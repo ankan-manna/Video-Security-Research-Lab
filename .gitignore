@@ -8,6 +8,7 @@ coverage/
 
 # Next.js build output
 apps/web/.next/
+*.tsbuildinfo
 
 # findings store data (generated at runtime, not fixtures)
 apps/api/data/*.json

@@ -1,0 +1,13 @@
+#EXTM3U
+#EXT-X-VERSION:5
+#EXT-X-TARGETDURATION:6
+#EXT-X-MEDIA-SEQUENCE:100
+#EXT-X-KEY:METHOD=AES-128,URI="https://example.com/keys/key1.bin",KEYFORMAT="identity"
+#EXTINF:6.0,
+segment-100.ts
+#EXTINF:6.0,
+segment-101.ts
+#EXT-X-KEY:METHOD=NONE
+#EXTINF:6.0,
+segment-102.ts
+#EXT-X-ENDLIST

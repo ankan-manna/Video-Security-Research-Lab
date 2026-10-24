@@ -14,6 +14,14 @@ const envSchema = z.object({
   RATE_LIMIT_MAX_REQUESTS: z.coerce.number().int().positive().default(30),
   FINDINGS_STORE_PATH: z.string().default("./data/findings.json"),
   DASHBOARD_ORIGIN: z.string().default("http://localhost:3000"),
+
+  ANALYSIS_HISTORY_STORE_PATH: z.string().default("./data/analysis-history.json"),
+  ANALYSIS_HISTORY_MAX_ENTRIES: z.coerce.number().int().positive().default(50),
+
+  HAR_MAX_UPLOAD_BYTES: z.coerce.number().int().positive().default(5_000_000),
+  HAR_MAX_ENTRIES: z.coerce.number().int().positive().default(1000),
+
+  MANIFEST_MAX_CONTENT_BYTES: z.coerce.number().int().positive().default(1_000_000),
 });
 
 export type Env = z.infer<typeof envSchema>;

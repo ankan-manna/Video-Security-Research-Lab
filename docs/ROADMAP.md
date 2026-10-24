@@ -3,7 +3,7 @@
 Five stages, each extending the same codebase. No stage rewrites a completed module without
 explicit justification recorded here.
 
-## Prompt 1 — Architecture, foundation, safe skeleton ✅ (this stage)
+## Prompt 1 — Architecture, foundation, safe skeleton ✅
 
 - Monorepo (`npm` workspaces): `apps/web`, `apps/api`, `apps/mock-lab`, `packages/security`.
 - `packages/security`: SSRF/allowlist URL-safety validator, unit tested.
@@ -17,38 +17,54 @@ explicit justification recorded here.
   URL-submission form against the real `/api/analyze` endpoint.
 - Docs: this roadmap, `README.md`, `docs/ARCHITECTURE.md`, `docs/SECURITY_MODEL.md`.
 
-## Prompt 2 — URL analysis and network capture inspection (next)
+## Prompt 2 — URL analysis and network capture inspection ✅ (this stage)
 
-Builds directly on Prompt 1's guard and API shell — no new services.
+Built directly on Prompt 1's guard and API shell — no new services, two new API modules
+(`src/har/`, `src/manifest/`) plus one new orchestration module (`src/analysis/`).
 
-- **URL Analysis Engine** (`apps/api`): replace `/api/analyze`'s `501` branch with a real,
-  IP-pinned safe-fetch (closing the DNS-rebinding gap noted in `docs/SECURITY_MODEL.md`), fetch
-  permitted metadata (title, OpenGraph tags, response headers, content type), and persist the
-  result via the existing `FindingsStore`/history, surfaced on the existing dashboard history
-  panel.
-- **Network Capture Analyzer**: a HAR file upload endpoint + parser. Must redact
-  `authorization`/`cookie`/token headers and any personal data by default before display or
-  storage, reusing the redaction conventions already established in `apps/api/src/logger.ts`.
-  Surfaces request/response timing, status codes, content types, and flags obvious
-  misconfigurations (e.g., missing security headers, overly permissive CORS).
-- New dashboard views: analysis history (replacing the current placeholder), HAR upload/inspection
-  view.
-- Tests: Vitest unit tests for the safe-fetch wrapper (timeout, size cap, redirect
-  re-validation) and the HAR parser/redaction logic.
+- **`packages/security`'s `safeFetch()`**: the IP-pinned, redirect-revalidating,
+  timeout/size/redirect-bounded fetch wrapper anticipated in Prompt 1's docs. Closes the
+  DNS-rebinding/TOCTOU gap — see `docs/SECURITY_MODEL.md`.
+- **URL Analysis Engine**: `/api/analyze`'s `501` branch is gone — it now runs a real
+  `safeFetch()`-backed fetch, extracts HTML `<title>`/description/canonical/OpenGraph metadata,
+  and persists every result to a new capped JSON history (`AnalysisStore`,
+  `GET /api/analyses`, `GET /api/analyses/:id`).
+- **Network Capture Analyzer**: `POST /api/har/import` parses a HAR capture (method, URL, status,
+  content type, timing, transfer size, non-sensitive headers, redirect info per entry), redacting
+  Cookie/Set-Cookie/Authorization/proxy-credential headers and token-shaped query parameters
+  *before* building the response. Oversized payloads rejected at the Fastify `bodyLimit` layer;
+  pathological entry counts truncated.
+- **Streaming Format Analyzer**: `POST /api/manifest/parse` — hand-written HLS (m3u8) parser
+  (master/media playlists, variants, segments, media sequence, `#EXT-X-KEY` presence) and a
+  `fast-xml-parser`-based DASH (MPD) parser (periods, adaptation sets, representations, segment
+  template/list presence, `ContentProtection` scheme presence). Accepts pasted content (no network)
+  or a URL (via the same `safeFetch` guard). Never fetches anything a manifest merely references.
+- Dashboard: real analysis-result view (replacing the Prompt 1 raw-JSON-only stub), a live
+  Analysis History panel, a HAR upload view with explicit per-field redaction indicators, and a
+  manifest inspector (HLS variant/segment tables, DASH period/adaptation-set tree, DRM/encryption
+  badges).
+- Tests: 92 passing across the monorepo (34 `packages/security`, 48 `apps/api`, 10
+  `apps/mock-lab`) — safe-fetch success/SSRF-redirect-attack/DNS-rebinding-via-redirect/redirect-
+  limit/size-limit (both `Content-Length` and streamed-bytes)/timeout/network-error cases via
+  `undici.MockAgent`; HAR parsing against valid/malformed/oversized/truncated fixtures with
+  redaction assertions; HLS/DASH parser fixtures (master+media+encrypted playlists, DASH with
+  `ContentProtection`+`SegmentTemplate`/`SegmentList`); route-level status-code-mapping tests with
+  `safeFetch` mocked at the module boundary.
 
-## Prompt 3 — Streaming manifest analysis and local chunked playback
+## Prompt 3 — Local chunked streaming lab (FFmpeg) and playback
 
-- Install/integrate FFmpeg (not present in the Prompt 1 environment — first task of this stage is
+The Streaming Format Analyzer already exists (built in Prompt 2) — this stage is about giving it
+real local media to analyze and play, not building the parser.
+
+- Install/integrate FFmpeg (not present in the Prompt 1/2 environment — first task of this stage is
   confirming/installing it) to generate real HLS segments + manifests for `apps/mock-lab`,
   replacing today's static placeholder text segments.
-- **Streaming Format Analyzer**: parse user-provided or publicly reachable HLS/DASH manifests
-  (via the Prompt 2 safe-fetch, or pasted/uploaded directly), explain segment references, codecs,
-  and delivery structure, and clearly separate observed facts from inferred assumptions. Never
-  attempts to defeat DRM or paywalls — manifests from protected sources are reported as
-  inaccessible, not worked around.
+- Point the dashboard's manifest inspector at the mock lab's now-real manifests as a demo path,
+  alongside the existing paste/arbitrary-URL modes.
 - Dashboard: a video workspace view with `hls.js` playback of the mock lab's (now real) HLS
-  output, plus a manifest-structure explainer panel.
-- Tests: manifest parser unit tests against known-good and malformed sample manifests.
+  output, alongside the manifest-structure explainer panel built in Prompt 2.
+- Tests: extend the Prompt 2 manifest parser tests with fixtures generated by the real FFmpeg
+  pipeline (in addition to the hand-written fixtures already in `apps/api/test/fixtures/`).
 
 ## Prompt 4 — Security test engine and auth/access-control simulations
 

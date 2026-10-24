@@ -1,7 +1,15 @@
+"use client";
+
+import { useState } from "react";
 import { StatusCard } from "@/components/StatusCard";
 import { UrlForm } from "@/components/UrlForm";
+import { AnalysisHistory } from "@/components/AnalysisHistory";
+import { HarUpload } from "@/components/HarUpload";
+import { ManifestInspector } from "@/components/ManifestInspector";
 
 export default function DashboardPage() {
+  const [historyRefreshKey, setHistoryRefreshKey] = useState(0);
+
   return (
     <main className="mx-auto max-w-4xl px-6 py-10">
       <header className="mb-8 border-b border-lab-border pb-4">
@@ -18,21 +26,24 @@ export default function DashboardPage() {
 
       <section className="grid gap-6 md:grid-cols-2">
         <StatusCard />
-        <div className="rounded-md border border-lab-border bg-lab-panel p-4">
-          <h2 className="mb-3 text-xs uppercase tracking-widest text-lab-accent2">Analysis History</h2>
-          <p className="text-xs text-neutral-500">
-            No analyses recorded yet. Persisted history and findings reporting arrive alongside the
-            URL Analysis Engine (Prompt 2) and the Findings/Reporting stage.
-          </p>
-        </div>
+        <AnalysisHistory refreshKey={historyRefreshKey} />
       </section>
 
       <section className="mt-6">
-        <UrlForm />
+        <UrlForm onAnalyzed={() => setHistoryRefreshKey((key) => key + 1)} />
+      </section>
+
+      <section className="mt-6">
+        <HarUpload />
+      </section>
+
+      <section className="mt-6">
+        <ManifestInspector />
       </section>
 
       <footer className="mt-10 border-t border-lab-border pt-4 text-[11px] text-neutral-600">
-        Stage 1 of 5 — architecture &amp; foundation skeleton. See docs/ROADMAP.md for what&apos;s next.
+        Stage 2 of 5 — URL analysis, network capture inspection, and streaming manifest analysis. See
+        docs/ROADMAP.md for what&apos;s next.
       </footer>
     </main>
   );
