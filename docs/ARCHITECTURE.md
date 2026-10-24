@@ -16,7 +16,8 @@
 ├─ apps/
 │  ├─ web/          Next.js 14 (App Router) dashboard — dark/hacker-style UI
 │  ├─ api/          Fastify backend — analysis orchestration, findings, auth/session concerns
-│  └─ mock-lab/      Fastify mock streaming server + synthetic auth, used only for local security tests
+│  └─ mock-lab/      Fastify mock streaming server + synthetic auth + video upload/HLS chunking
+│                     pipeline (src/video/), used only for local security tests
 ├─ packages/
 │  └─ security/      Shared, framework-agnostic SSRF/URL-safety guard + IP-pinned safeFetch
 │                     (consumed by apps/api's URL Analysis Engine and manifest-by-URL parsing)
@@ -38,6 +39,8 @@ without publishing anything or duplicating code.
 | HTML metadata extraction | `node-html-parser` | A small, dependency-free HTML parser — enough to reliably pull `<title>`/meta tags out of real-world (sometimes malformed) HTML without hand-rolling a brittle regex parser. |
 | DASH (MPD) parsing | `fast-xml-parser` | Hand-writing a correct XML parser (attributes, self-closing tags, repeated elements) is disproportionately error-prone; this is a small, dependency-free, widely used parser. HLS (m3u8), by contrast, is hand-parsed — it's plain-text tag/value lines, not XML, and a custom parser keeps full control over exactly which fields are reported. |
 | Mock lab | A second, separate Fastify service | Keeping it a distinct process (own port, own package) means "the thing under test" is never the same process as "the thing running the tests" — mirroring a real client/server security boundary, which matters for the access-control demos in Prompt 4. |
+| Video upload | `@fastify/multipart` | A HAR capture is JSON and could ride the existing JSON-body convention (Prompt 2); a video file genuinely isn't — this is the one place in the repo an actual file-upload plugin is warranted. |
+| Video transcoding | FFmpeg/ffprobe via `node:child_process.spawn` (argv array) | The project vision calls for FFmpeg explicitly. `spawn` with an argv array (never a shell string via `exec`) means no filename or option value can be interpreted as shell syntax — there is no injection surface to defend, by construction. |
 | Logging | Pino (+ pino-pretty in dev) | Structured logs with field-level redaction (`redact.paths`) are the simplest reliable way to guarantee secrets never reach disk. |
 | Testing | Vitest (unit), Playwright (planned) | Vitest is fast and has first-class ESM/TS support with minimal config; Playwright is deferred to Prompt 5, which is where the roadmap places integration/E2E coverage. |
 | Database (planned) | PostgreSQL + Prisma | Not introduced yet — the Prompt 1 skeleton only needs a findings list, served from a JSON file. Prisma/Postgres get introduced in Prompt 4 when test results need to be structured and queryable (test runs, expected-vs-actual outcomes, severities). |
@@ -88,6 +91,31 @@ apps/mock-lab
    └─ video is membersOnly   → SyntheticAuth.verifyToken() → role check → 200 / 401 / 403
 ```
 
+```
+Browser (apps/web)
+   │  POST /mock/videos  (multipart: file + visibility, Authorization: Bearer <token>)
+   ▼
+apps/mock-lab/src/routes/videos.ts
+   │  identifyRequester() — 401 if no/invalid token
+   │  buffer the file part, detectVideoFormat() on its magic bytes — 400 if neither MP4 nor WebM
+   │  write data/videos/<id>/original.<ext>, VideoStore.create({status:"uploaded", ownerId: sub})
+   │  respond 202 immediately
+   │
+   └─ in the background: video/processor.ts → processVideo(id)
+        │  ffprobe (video/ffmpeg.ts) → duration over MOCK_LAB_MAX_DURATION_SECONDS? → status "failed"
+        │  ffmpeg → HLS segments into a scratch hls.tmp/ dir
+        │  success → atomically swap hls.tmp/ → hls/, VideoStore.update({status:"ready", segments})
+        └─ any failure at any step → status "failed", sanitized error (no internal paths), hls.tmp/ cleaned,
+           any PREVIOUS successful hls/ from an earlier run is left untouched (idempotent retry)
+
+Browser polls GET /mock/videos/:id until status is "ready"/"failed", then:
+   GET /mock/videos/:id/manifest          → master playlist (authorizeVideoAccess gate)
+   GET /mock/videos/:id/playlist.m3u8     → media playlist   (same gate, independently re-checked)
+   GET /mock/videos/:id/segments          → inventory         (same gate, independently re-checked)
+   GET /mock/videos/:id/segments/:segId   → segment bytes      (same gate, independently re-checked;
+                                              supports Range: 200 full / 206 partial / 416 unsatisfiable)
+```
+
 ## Module boundaries and reuse across stages
 
 - `packages/security` owns *all* SSRF/allowlist decisions, now including the actual fetch: its
@@ -105,7 +133,14 @@ apps/mock-lab
   The Security Test Engine (Prompt 4) will be another route group here, not a new service.
   (One intentional exception: the mock streaming/auth lab stays its own process — see above.)
 - `apps/mock-lab` owns every piece of "local, synthetic, safe-to-attack" infrastructure: role
-  tokens, manifests, segments. The Prompt 4 Security Test Engine is a *client* of this service — it
+  tokens, manifests, segments, and — as of this stage — real uploaded-and-transcoded test videos
+  (`src/video/`). The Prompt 1 static demo fixtures (`data/videoRegistry.ts`) and the dynamic,
+  uploaded-video store (`video/videoStore.ts`) are deliberately two separate registries behind one
+  shared authorization gate (`auth/accessControl.ts`'s `AccessPolicyTarget`, a minimal
+  `{ membersOnly: boolean }` shape both satisfy) rather than one merged model — the static fixtures
+  use placeholder text as segment "content" (never real media) and exist purely so Prompt 1's
+  access-control tests have something stable to assert against; real video playback only ever
+  touches the dynamic store. The Prompt 4 Security Test Engine is a *client* of this service — it
   issues logins, makes requests, and records expected-vs-actual outcomes — it does not reimplement
   the lab's auth logic.
 - `apps/web` owns presentation only. It talks to `apps/api` and `apps/mock-lab` over HTTP exactly
@@ -113,17 +148,20 @@ apps/mock-lab
 
 ## What's deliberately not built yet
 
-- No database/ORM — analysis history and findings are still JSON files on disk. Introduced when the
-  Security Test Engine needs structured, queryable results (Prompt 4).
-- No job queue — URL analysis, HAR import, and manifest parsing all run synchronously within a
-  single request/response (fast enough at this scale thanks to the timeout/size caps already
-  enforced by `safeFetch`); introduced only if/when a later stage's workload is slow enough to need
-  async processing.
-- No FFmpeg integration — introduced in Prompt 3, when the mock lab needs real HLS media instead
-  of static placeholder manifests/segments, and the Streaming Manifest Analyzer built this stage
-  gets wired into real local chunked playback.
-- No multipart file upload support — HAR import takes the capture as a JSON request body (a HAR
-  file already *is* JSON) rather than `multipart/form-data`; revisit only if a future input format
-  genuinely isn't JSON-shaped.
-- No CI beyond a basic install/build/test workflow — expanded as new workspaces gain real build
-  steps (e.g., Next.js production build, Playwright) in later prompts.
+- No database/ORM — analysis history, findings, and the video registry are all JSON files on disk.
+  Introduced when the Security Test Engine needs structured, queryable results (Prompt 4); existing
+  `FindingsStore`/`AnalysisStore`/`VideoStore` call sites get migrated then, not duplicated.
+- No job queue — URL analysis, HAR import, and manifest parsing run synchronously within a single
+  request/response; video *upload* responds immediately (`202`) and processing runs in a detached
+  background `Promise` within the same process, which is enough for a local single-user tool.
+  Redis/BullMQ is introduced only if/when that stops being enough — not assumed in advance.
+- No multi-bitrate ABR ladder — every uploaded video produces exactly one HLS rendition (one master
+  playlist wrapping one media playlist). The master/media/segment *structure* required by the
+  project vision is real; multiple quality levels per video is a Prompt 4+ enhancement if ever
+  needed, not a missing piece of this stage's scope.
+- No streaming-to-disk upload — `@fastify/multipart`'s `part.toBuffer()` buffers the whole file in
+  memory before writing it, bounded by `MOCK_LAB_MAX_UPLOAD_BYTES`. Acceptable for a local research
+  tool's upload sizes; a true streaming write would be needed before this handled large files at
+  scale.
+- No CI beyond a basic install/build/test workflow (now also installing FFmpeg) — expanded as new
+  workspaces gain real build steps (e.g., Next.js production build, Playwright) in later prompts.

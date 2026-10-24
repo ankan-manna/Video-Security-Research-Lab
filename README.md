@@ -7,9 +7,10 @@ submitted capture or a local mock streaming lab, never by bypassing a real platf
 
 **This project is independent of any YouTube clone.** It does not read, call, or depend on that
 repository's source, database, APIs, or infrastructure. It takes a video URL and permitted public
-data (page metadata, HTTP headers, user-supplied HAR files, publicly reachable manifests) as input.
+data (page metadata, HTTP headers, user-supplied HAR files, publicly reachable manifests, and the
+user's own local test videos) as input.
 
-> Stage: **Prompt 2 of 5 — URL analysis, network capture inspection, and streaming manifest analysis.**
+> Stage: **Prompt 3 of 5 — local video chunking, HLS streaming, and range-request delivery.**
 > See [docs/ROADMAP.md](docs/ROADMAP.md) for the full build plan and what's implemented so far.
 
 ## What this is not
@@ -20,13 +21,16 @@ data (page metadata, HTTP headers, user-supplied HAR files, publicly reachable m
 - Not a place to paste real passwords, live session cookies, or production API keys. The lab's
   authentication demos use synthetic, locally-issued tokens only — see
   [docs/SECURITY_MODEL.md](docs/SECURITY_MODEL.md).
+- Not a tool that transcodes or streams anything but your own local test video files — never a
+  real platform's content, protected or otherwise.
 
 ## Architecture at a glance
 
 ```
 apps/web        Next.js dashboard (dark/hacker-style UI)
 apps/api        Fastify backend: URL analysis, HAR import, manifest parsing, findings, rate limiting
-apps/mock-lab   Fastify mock streaming + synthetic auth lab for controlled security tests
+apps/mock-lab   Fastify mock streaming + synthetic auth lab: role-gated video upload, FFmpeg->HLS
+                chunking, manifest/segment delivery with HTTP range support
 packages/security  Shared SSRF/allowlist URL-safety guard + IP-pinned safe-fetch, used by apps/api
 ```
 
@@ -36,8 +40,11 @@ Full details: [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
 
 - Node.js >= 20
 - npm (ships with Node; this repo uses npm workspaces — no pnpm/yarn required)
-- Not required yet, but planned for Prompt 3: FFmpeg (for generating local HLS test media) and
-  optionally Docker, if you'd rather run FFmpeg and PostgreSQL in containers.
+- **FFmpeg + ffprobe on `PATH`** — required for `apps/mock-lab`'s video chunking pipeline (Prompt
+  3). Install with `brew install ffmpeg` (macOS) or `apt-get install ffmpeg` (Debian/Ubuntu, also
+  what CI uses). Everything else in the repo works without it; only video upload/processing needs
+  it.
+- Optional: Docker, if you'd rather run FFmpeg and a future PostgreSQL (Prompt 4) in containers.
 
 ## Setup
 
@@ -59,10 +66,10 @@ npm run dev:mock-lab   # Mock streaming lab   -> http://localhost:4002
 npm run dev:web        # Next.js dashboard    -> http://localhost:3000
 ```
 
-Open `http://localhost:3000` once all three are running. The dashboard talks to the real backend
-APIs below: submit a URL and watch the SSRF-guarded fetch run and its metadata appear, drop in a
-`.har` file to see it parsed and redacted, or paste/fetch an HLS or DASH manifest to see its
-structure explained.
+Open `http://localhost:3000` once all three are running. Scroll to **Local Video Chunking &
+Streaming Lab**, log in with any synthetic role, upload a small MP4 or WebM file, watch it
+transcode to HLS, then select it to play back through the generated manifest and inspect its
+segment inventory.
 
 ## Running tests
 
@@ -71,11 +78,16 @@ npm test
 ```
 
 This runs the Vitest suites in `packages/security`, `apps/api`, and `apps/mock-lab` via npm
-workspaces — **92 tests, all passing** as of this stage (34 + 48 + 10). (`apps/web` has no
-automated tests yet — end-to-end/integration tests are explicitly scoped to Prompt 5 in the
-roadmap.)
+workspaces — **148 tests, all passing** as of this stage (34 + 48 + 66). `apps/mock-lab`'s video
+pipeline tests invoke **real FFmpeg** against small synthetic fixtures (generated once via
+`ffmpeg -f lavfi`, committed under `apps/mock-lab/test/fixtures/`) rather than mocking it — FFmpeg
+must be installed to run `npm test` for that workspace (see Requirements above; CI installs it
+automatically). (`apps/web` has no automated tests yet — end-to-end/integration tests are
+explicitly scoped to Prompt 5 in the roadmap.)
 
-## Backend API reference (`apps/api`)
+## Backend API reference
+
+### `apps/api` — analysis engines
 
 | Method | Path | Purpose |
 |---|---|---|
@@ -83,65 +95,88 @@ roadmap.)
 | `POST` | `/api/analyze` | Runs the URL Analysis Engine: SSRF-guarded fetch + HTML metadata extraction. Persists the result. |
 | `GET` | `/api/analyses` | Lists recent analysis history (newest first, capped). |
 | `GET` | `/api/analyses/:id` | Retrieves one stored analysis result. |
-| `POST` | `/api/har/import` | Imports and sanitizes a HAR (HTTP Archive) capture — see redaction behavior below. |
-| `POST` | `/api/manifest/parse` | Parses HLS or DASH manifest text, either pasted directly or fetched by URL (same SSRF guard). |
+| `POST` | `/api/har/import` | Imports and sanitizes a HAR (HTTP Archive) capture. |
+| `POST` | `/api/manifest/parse` | Parses HLS or DASH manifest text, either pasted directly or fetched by URL. |
 | `GET` | `/api/findings` | Security findings store (populated starting Prompt 4). |
 
-Full request/response shapes, status-code mapping, and configuration: [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
+### `apps/mock-lab` — synthetic auth + local streaming lab
 
-## What's implemented in this stage (Prompt 2)
+| Method | Path | Purpose |
+|---|---|---|
+| `POST` | `/mock/auth/login` | Issues a synthetic session token for a role (`guest`/`member`/`admin`). |
+| `POST` | `/mock/videos` | Uploads a test video (multipart, `file` + `visibility`). Returns `202` immediately; processes to HLS in the background. |
+| `GET` | `/mock/videos` | Lists uploaded test videos (metadata + visibility, no auth required). |
+| `GET` | `/mock/videos/:id` | Retrieves one video's metadata/status. |
+| `DELETE` | `/mock/videos/:id` | Deletes a video and its files — owner or admin only. |
+| `GET` | `/mock/videos/:id/manifest` | The entry-point HLS playlist (master, for uploaded videos; the Prompt 1 flat demo playlist for the two static fixtures). |
+| `GET` | `/mock/videos/:id/playlist.m3u8` | The media playlist for an uploaded video. |
+| `GET` | `/mock/videos/:id/segments` | Segment inventory (index, duration, size, format) — gated the same as content. |
+| `GET` | `/mock/videos/:id/segments/:segmentId` | An individual `.ts` segment. Supports HTTP range requests. |
 
-- **`packages/security`'s `safeFetch()`** — the IP-pinned, SSRF-safe fetch wrapper the project
-  vision called for. Built directly on Prompt 1's `validateUrlForAnalysis()`: every hop (including
-  every redirect target) is re-validated from scratch, and the actual TCP connection for that hop
-  is pinned to exactly the already-validated address via a custom DNS lookup function — closing
-  the DNS-rebinding gap that a plain "validate, then fetch" sequence leaves open. Enforces a
-  combined connect/headers/body timeout, a response-size cap (checked against `Content-Length` up
-  front and against actual bytes received as a backstop), and a bounded, re-validated redirect
-  count.
-- **URL Analysis Engine** — `POST /api/analyze` now actually fetches the URL (through `safeFetch`)
-  and, for HTML responses, extracts `<title>`, meta description, canonical link, and OpenGraph
-  tags. Every result is persisted to a capped JSON history (`GET /api/analyses`,
-  `GET /api/analyses/:id`). Non-HTML responses report their status/headers/content-type with a
-  `null` metadata field rather than guessing.
-- **Network Capture Analyzer (HAR Importer)** — `POST /api/har/import` parses a standard HAR file
-  and returns, per entry: method, URL, status, content type, timing, transfer size, and
-  non-sensitive headers. `Cookie`, `Set-Cookie`, `Authorization`, proxy-credential headers, and
-  token-shaped query parameters are redacted **before** the response is ever constructed — the raw
-  values never exist in anything returned, logged, or stored. Oversized payloads are rejected with
-  `413` before being buffered; an in-budget-but-pathological entry count is truncated rather than
-  fully processed.
-- **Streaming Manifest Analyzer** — `POST /api/manifest/parse` accepts pasted manifest text or a
-  URL (fetched via the same `safeFetch` guard). Hand-written HLS parser recognizes master vs. media
-  playlists, variant streams (bandwidth/resolution/codecs/frame-rate), segments, media sequence,
-  and `#EXT-X-KEY` encryption tags (method/keyformat presence only — key URIs are never
-  dereferenced). DASH parser (via `fast-xml-parser`) recognizes periods, adaptation sets,
-  representations, segment template/list presence, and `ContentProtection` (DRM) scheme presence.
-  Content that's neither is reported as unsupported rather than guessed at.
-- **Dashboard** — the URL form now renders the real structured result (status, metadata, headers,
-  redirect chain) with loading/blocked/failure states; a new Analysis History panel lists real
-  persisted analyses and live-updates after each submission; a new HAR upload view shows a
-  request/response table with explicit "redacted" indicators; a new manifest inspector shows HLS
-  variant/segment tables or a DASH period/adaptation-set/representation tree, with DRM/encryption
-  badges.
+Full request/response shapes, status-code mapping, and configuration:
+[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
+
+## What's implemented in this stage (Prompt 3)
+
+- **Video upload pipeline** (`apps/mock-lab/src/video/`) — multipart upload via
+  `@fastify/multipart`, validated by **magic bytes** (MP4 `ftyp` box / WebM EBML header), never by
+  filename or client-supplied `Content-Type`. Size is capped at the Fastify `bodyLimit`/multipart
+  `fileSize` layer (`413` before full buffering); duration is checked via `ffprobe` after upload
+  and before transcoding (clean `failed` status, not an indefinite transcode).
+- **FFmpeg-backed HLS chunking** — every upload is transcoded to a fixed H.264 Baseline L3.0 + AAC
+  profile (so the manifest's `CODECS` attribute is always accurate) via `ffmpeg`/`ffprobe` run as
+  argv-array child processes (never a shell string — no injection surface). Output is built in a
+  scratch directory and atomically swapped into place only on full success, so a crashed or retried
+  run never leaves a half-written segment set.
+- **Streaming API** — upload, metadata, manifest (master + media playlist), segment inventory,
+  individual segment delivery, and ownership-checked delete, all under `apps/mock-lab` (see table
+  above) — reusing, not duplicating, the synthetic auth system built in Prompt 1.
+- **HTTP delivery correctness** — correct `Content-Type`/`Cache-Control` per resource, real HTTP
+  range-request support (`206`/`416`) on segment delivery, aborted-connection cleanup, and a
+  generalized `AccessPolicyTarget` authorization interface (`membersOnly: boolean`) shared by both
+  the Prompt 1 static demo videos and real uploaded ones — the one interface Prompt 4 will connect
+  to synthetic accounts and systematic security testing.
+- **Dashboard** — a Local Video Chunking & Streaming Lab section: a session bar (pick a synthetic
+  role, no identity hardcoded in the frontend — the server decides the token/role/`sub`), an
+  upload form with processing-status polling, a video library with public/protected badges and
+  delete, an `hls.js`-backed player with a playback diagnostics log, and a segment inventory table.
+
+## Storage layout (`apps/mock-lab`)
+
+```
+apps/mock-lab/data/
+  videos.json                 # VideoStore — JSON array of video records (same pattern as
+                               # apps/api's FindingsStore/AnalysisStore)
+  videos/<id>/
+    original.<mp4|webm>       # the uploaded file, as received
+    hls/
+      segment-000.ts, ...     # FFmpeg-generated segments (master/media playlists are built
+                               # on demand from stored metadata, not written to disk)
+```
+
+Deleting a video removes both its `videos.json` entry and its entire `videos/<id>/` directory.
+Failed/interrupted processing never leaves a partial `hls/` directory in place — see
+docs/ARCHITECTURE.md's idempotency note.
 
 ## Known limitations (see docs/SECURITY_MODEL.md for detail)
 
-- No database yet — analysis history and findings are JSON files on disk. Still sufficient at this
-  scale; moves to PostgreSQL/Prisma when the Security Test Engine (Prompt 4) needs structured,
-  queryable results.
-- HAR import accepts the capture as a JSON request body (the browser reads the `.har` file and
-  posts its parsed contents) rather than a multipart file upload — simpler and sufficient since a
-  HAR file already *is* JSON; documented as a deliberate choice, not an oversight.
-- FFmpeg is still not installed in this environment and no media pipeline exists yet; the mock
-  lab's manifest/segments remain static placeholder text. That arrives in Prompt 3, which is also
-  where the manifest analyzer gets wired into real local playback.
-- The manifest analyzer never fetches a segment, key, or license URI it finds inside a manifest —
-  only the manifest document itself. This is intentional (see "non-negotiable boundaries" in
-  docs/SECURITY_MODEL.md), not a missing feature.
+- No database yet — video records, analysis history, and findings are all JSON files on disk.
+  Still sufficient at this scale; moves to PostgreSQL/Prisma when the Security Test Engine
+  (Prompt 4) needs structured, queryable results.
+- Single rendition only — every upload produces one HLS quality level (a master playlist wrapping
+  one media playlist), not a multi-bitrate ABR ladder. The master/media/segment structure is real;
+  the "multiple qualities" dimension is out of scope for this stage.
+- Uploads are buffered fully in memory before being written to disk (bounded by
+  `MOCK_LAB_MAX_UPLOAD_BYTES`) — acceptable for a local research tool's upload sizes, not a
+  streaming-to-disk design.
+- The `VideoStore`/`FindingsStore`/`AnalysisStore` JSON-file pattern is read-modify-write and not
+  safe under concurrent writers — fine for a single local dev process, a known constraint carried
+  forward from Prompt 1/2.
 
 ## Next step
 
-Prompt 3: install/integrate FFmpeg to generate real local HLS media for `apps/mock-lab`, and wire
-the Streaming Manifest Analyzer into a local chunked-playback view (`hls.js`). See
+Prompt 4: a Security Test Engine that drives the `AccessPolicyTarget` authorization interface
+built this stage — systematic tests for unauthenticated access, expired sessions, role-based
+authorization, IDOR, and unauthorized segment requests against both the static demo videos and
+real uploaded ones, plus the PostgreSQL/Prisma migration for structured results. See
 [docs/ROADMAP.md](docs/ROADMAP.md).

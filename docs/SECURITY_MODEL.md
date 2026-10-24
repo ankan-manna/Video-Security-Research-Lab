@@ -21,11 +21,16 @@ from the project vision is actually enforced in code today vs. planned for a lat
    says so explicitly. This rule applies to every stage: this one included — see "Threats
    explicitly out of scope for this stage" below for what's genuinely still missing, stated
    plainly rather than glossed over.
-5. **Never act on what a manifest merely references.** The Streaming Manifest Analyzer (added this
-   stage) parses the manifest document itself only. It never fetches a segment URI, a key URI from
-   an `#EXT-X-KEY` tag, or anything pointed to by a DASH `ContentProtection` element — it reports
-   that such a reference *exists* (method, scheme, presence) and stops there. No decryption, no DRM
-   license interaction, ever.
+5. **Never act on what a manifest merely references.** The Streaming Manifest Analyzer parses the
+   manifest document itself only. It never fetches a segment URI, a key URI from an `#EXT-X-KEY`
+   tag, or anything pointed to by a DASH `ContentProtection` element — it reports that such a
+   reference *exists* (method, scheme, presence) and stops there. No decryption, no DRM license
+   interaction, ever.
+6. **The local streaming lab only ever transcodes and serves the user's own uploaded test videos.**
+   `apps/mock-lab`'s video pipeline (added this stage) never fetches video from a URL, never
+   touches YouTube or any other real platform, and never reconstructs anything from a HAR capture
+   or manifest analysis. Its only input is a file the user directly uploaded through
+   `POST /mock/videos`.
 
 ## SSRF defense (`packages/security`)
 
@@ -130,11 +135,16 @@ The mock lab exists purely so the Security Test Engine (Prompt 4) has something 
   `403`; unknown video or segment id → `404`.
 - This already demonstrates the four access-control cases the project vision calls out for the
   Security Test Engine: unauthenticated access, expired sessions, role-based authorization, and
-  unauthorized segment requests (see `apps/mock-lab/test/auth-and-access.test.ts`). Prompt 4 adds
-  the *orchestration* on top: running these as named test cases against the lab, recording
-  expected vs. actual outcomes, and surfacing them as findings. True IDOR scenarios (enumerating
-  or guessing another user's resource id) will get dedicated test cases once video ids stop being
-  simple fixed strings — tracked in docs/ROADMAP.md.
+  unauthorized segment requests (see `apps/mock-lab/test/auth-and-access.test.ts`). As of this
+  stage, the same four cases are also exercised against real uploaded videos (see
+  `apps/mock-lab/test/videos-upload-and-streaming.test.ts`'s "authorization for members-only
+  uploaded videos" suite) through the exact same `authorizeVideoAccess()` gate. Prompt 4 adds the
+  *orchestration* on top: running these as named test cases, recording expected vs. actual
+  outcomes, and surfacing them as findings. Real IDOR scenarios are closer now than in Prompt 1 —
+  uploaded video ids are `randomUUID()`s (not enumerable), but segment ids *are* predictable
+  (`segment-000.ts`, `segment-001.ts`, ...), which is exactly the shape Prompt 4's IDOR test cases
+  need and exactly why the authorization re-check on every segment request (not just the manifest)
+  matters.
 
 ## HAR import redaction (`apps/api/src/har/`)
 
@@ -203,20 +213,139 @@ Unsupported or unrecognized content is reported as such (`422 unsupported_manife
 specific reason) rather than guessed at — format detection sniffs for `#EXTM3U` (HLS) or an `<MPD`
 element (DASH) and refuses to proceed on anything else.
 
+## Video upload and streaming pipeline (`apps/mock-lab/src/video/`)
+
+### Trusting the file, not the client's claims about it
+
+`POST /mock/videos` never trusts the client-supplied filename or `Content-Type`. The uploaded
+bytes are buffered and checked against real magic bytes —
+`formatDetection.ts#detectVideoFormat()` looks for the WebM/Matroska EBML header (`1A 45 DF A3` at
+offset 0) or the MP4/ISO-BMFF `ftyp` box (ASCII `ftyp` at offset 4) — before anything else happens.
+A `.mp4`-named file containing arbitrary bytes is rejected with `400 unsupported_format`
+regardless of what its extension or declared MIME type claim (see
+`apps/mock-lab/test/video/formatDetection.test.ts`). The extension actually written to disk
+(`original.mp4` / `original.webm`) comes from the *detected* format, never from the client's
+filename.
+
+### Size and duration limits
+
+- **Size**: `@fastify/multipart` is registered with `limits.fileSize = MOCK_LAB_MAX_UPLOAD_BYTES`
+  — an oversized upload is rejected (`413`) by the plugin itself, not after being fully buffered.
+- **Duration**: unknowable before the file is at least partially read, so it's checked immediately
+  after upload via `ffprobe`, *before* the (expensive) transcode starts. A video over
+  `MOCK_LAB_MAX_DURATION_SECONDS` fails cleanly with a clear message rather than transcoding
+  forever or silently truncating.
+
+### Path traversal and storage-path disclosure (`video/paths.ts`)
+
+Every filesystem path this pipeline touches is built from one of exactly two kinds of input:
+values this server generated itself (`randomUUID()` video ids, `segment-%03d.ts` filenames chosen
+by the FFmpeg invocation) or route parameters that are validated before use.
+`isSafePathSegment()` whitelists `[a-zA-Z0-9][a-zA-Z0-9._-]{0,127}` and explicitly rejects any
+value containing `..`; `resolveSafePath()` is defense in depth on top of that — it joins segments
+under a base directory and verifies the resolved path still starts with that base directory,
+returning `null` (which routes turn into a clean `404`, never a `500` or a stack trace) if it
+doesn't. A segment id is also checked against the video's actual known segment list before either
+function is even consulted, so a traversal attempt against `GET /mock/videos/:id/segments/:segId`
+never reaches the filesystem layer at all in practice — see
+`apps/mock-lab/test/video/paths.test.ts` and the "path traversal resistance" suite in
+`apps/mock-lab/test/videos-upload-and-streaming.test.ts`.
+
+Internal storage paths never appear in any API response. `processor.ts#sanitizeErrorMessage()`
+strips the resolved `MOCK_LAB_DATA_DIR` prefix from any error message (e.g. FFmpeg stderr, which
+otherwise includes the full input file path) before it's stored or returned — asserted directly in
+`apps/mock-lab/test/video/processor.test.ts` ("fails cleanly... without leaking the internal data
+directory path") and `videos-upload-and-streaming.test.ts` ("never includes a filesystem path in
+any API response").
+
+### Subprocess execution (`video/ffmpeg.ts`)
+
+`ffprobe`/`ffmpeg` are invoked via `node:child_process.spawn(command, argsArray)` — never
+`exec()` or any form of shell string interpolation. Every argument (including the input file path)
+is passed as a discrete array element, so there is no shell to interpret `;`, `|`, backticks, or
+any other metacharacter a crafted filename or path might contain — this isn't input sanitization
+closing a gap, it's a construction that has no such gap to begin with.
+
+### Authorization layer: `AccessPolicyTarget` (`auth/accessControl.ts`)
+
+The same `authorizeVideoAccess()` gate introduced in Prompt 1 for the static demo fixtures now
+also guards every real-video route (manifest, media playlist, segment inventory, individual
+segment), generalized to a minimal structural interface:
+
+```ts
+export interface AccessPolicyTarget {
+  membersOnly: boolean;
+}
+```
+
+Both the static `MockVideo` type and the dynamic `VideoRecord` (via `isMembersOnly()`, which maps
+`visibility === "members"`) satisfy this without either module importing the other. This is
+deliberately the **one** authorization interface in the codebase — Prompt 4's Security Test Engine
+is expected to drive this same function with synthetic accounts rather than introduce a second
+authorization mechanism, consistent with the project vision's "integrate with the existing
+authenticated-user system" requirement.
+
+Critically, **every** content-bearing route re-runs this check independently — the manifest route,
+the media-playlist route, the segment-inventory route, and the individual-segment route each call
+`authorizeVideoAccess()` themselves rather than trusting that an earlier request (e.g. for the
+manifest) was authorized. This means knowing a protected video's segment id — by watching network
+traffic as an authorized user, for instance — is not sufficient to fetch that segment without a
+valid, correctly-roled token: `apps/mock-lab/test/videos-upload-and-streaming.test.ts`'s "knowing a
+protected video's segment id alone does not grant access" test asserts this directly, and the
+segment-inventory listing itself is gated the same way so the segment ids can't even be enumerated
+without authorization in the first place.
+
+### Ownership (`sub` claim, `DELETE /mock/videos/:id`)
+
+`SyntheticAuth` (Prompt 1) is extended, not replaced, with an optional `sub` claim — a synthetic
+identity used only for resource ownership, carried through as a third, optional constructor
+parameter (`issueToken(role, expiresInSeconds, sub)`) so every pre-existing call site keeps working
+unchanged; omitting it mints a fresh random identity. `POST /mock/videos` records the uploader's
+`sub` as `ownerId`; `DELETE /mock/videos/:id` requires the requester's `sub` to match `ownerId`, or
+the requester's role to be `admin`. The two Prompt 1 static demo fixtures are not deletable through
+this endpoint at all (`403`, checked before any auth lookup) — they're build-time fixtures, not
+user data.
+
+### HTTP delivery (`video/rangeDelivery.ts`)
+
+`sendFileWithRangeSupport()` handles the full range-request contract: `200` for a plain request,
+`206` + `Content-Range` for a satisfiable `Range` header, `416` + `Content-Range: bytes */<size>`
+for an unsatisfiable one (start beyond EOF, start-after-end, a malformed or multi-range header
+falls back to "no range" rather than guessing). One correctness bug surfaced only by live testing
+here (not by any unit test with a mocked reply): the `416` branch sends a JSON error body, and an
+earlier version set `Content-Type: video/mp2t` unconditionally *before* branching on the range
+result — Fastify then failed trying to serialize a JS object as `video/mp2t`
+(`FST_ERR_REP_INVALID_PAYLOAD_TYPE`, a `500`). Fixed by only setting the media `Content-Type` in
+the branches that actually send file content. If a client disconnects mid-transfer, the underlying
+`fs.createReadStream` is destroyed via the request's `close` event — an aborted/cancelled download
+doesn't leave a dangling open file handle.
+
+**Ordinary HLS segment request vs. an HTTP byte-range request** — these are not the same thing,
+and this pipeline deliberately supports both: a player that walks the media playlist's `#EXTINF`
+entries one `.ts` file at a time issues a plain `GET` for each segment and gets a full `200`
+response; a player seeking within a single (possibly large) segment, or implementing
+`#EXT-X-BYTERANGE`, issues a `GET` with a `Range` header and gets `206`/`416` as appropriate. Not
+every player uses the same strategy, and `sendFileWithRangeSupport()` serves both from one code
+path rather than assuming one or the other.
+
 ## Input validation
 
 Every HTTP request body in `apps/api` and `apps/mock-lab` is validated with Zod before use
 (`analyzeRequestSchema`, `loginSchema`, `harImportRequestSchema`, `manifestParseRequestSchema`,
 `harFileSchema` for the HAR structure itself). Invalid input gets a `400` with a human-readable
-reason, never a stack trace or silent coercion.
+reason, never a stack trace or silent coercion. The video upload route is the one exception that
+isn't Zod-validated JSON (it's `multipart/form-data`); its `visibility` field is checked against an
+explicit allowlist (`"public" | "members"`, anything else silently defaults to `"public"` rather
+than being rejected — a deliberate leniency since it's a non-security-relevant display field, not
+an ownership or authorization input) and the file itself goes through format detection, not Zod.
 
 ## Threats explicitly out of scope for this stage
 
 - Authentication/authorization of the dashboard itself (there is no user login yet — anyone who
   can reach the dashboard can use it, which is acceptable for a local research tool but would need
   revisiting before any shared/public deployment).
-- Persistent storage security (the findings/analysis-history JSON files have no access control
-  beyond the filesystem's — revisited when PostgreSQL is introduced in Prompt 4).
+- Persistent storage security (the findings/analysis-history/video-registry JSON files have no
+  access control beyond the filesystem's — revisited when PostgreSQL is introduced in Prompt 4).
 - HAR/manifest-content request bodies are capped by byte size (`HAR_MAX_UPLOAD_BYTES`,
   `MANIFEST_MAX_CONTENT_BYTES`) and the HAR entry count is separately capped
   (`HAR_MAX_ENTRIES`), but there's no protection against pathologically *nested* JSON/XML beyond
@@ -225,3 +354,15 @@ reason, never a stack trace or silent coercion.
   are internally consistent (e.g., a `BANDWIDTH` that doesn't match the variant's actual segment
   sizes) — it reports what the manifest declares, not whether the declaration is truthful. That's
   a correctness check for a future stage, not a security boundary this stage claims to enforce.
+- Video uploads are not scanned for malicious payloads embedded in otherwise-valid media containers
+  (polyglot files, decoder-targeting exploits in a crafted MP4/WebM). FFmpeg itself is the trust
+  boundary here: a file passes format detection on 4-12 bytes of magic-byte evidence, and FFmpeg —
+  a large, independently-maintained C codebase — is what actually parses the rest. This is a known,
+  accepted dependency on FFmpeg's own hardening, not a gap this project's own code closes.
+- No rate limiting specific to uploads or transcoding (the general `@fastify/rate-limit` on
+  `apps/api` doesn't apply to `apps/mock-lab` at all) — a local single-user tool has no competing
+  tenants to protect from each other; revisit if that assumption ever changes.
+- No limit on concurrent in-flight transcodes — `processor.ts`'s `inFlight` set only prevents the
+  *same* video id from being processed twice concurrently, not a cap on how many *different*
+  uploads can transcode at once. Fine for manual local testing; would need a queue (Prompt 4+'s
+  "add Redis/BullMQ only when needed" principle) under real concurrent load.
