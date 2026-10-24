@@ -1,0 +1,22 @@
+node_modules/
+dist/
+build/
+coverage/
+.env
+.env.local
+*.local
+
+# Next.js build output
+apps/web/.next/
+
+# findings store data (generated at runtime, not fixtures)
+apps/api/data/*.json
+
+# logs
+*.log
+npm-debug.log*
+
+# OS / editor
+.DS_Store
+.vscode/
+.idea/

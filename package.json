@@ -1,0 +1,21 @@
+{
+  "name": "video-security-research-lab",
+  "private": true,
+  "version": "0.1.0",
+  "description": "Standalone security research lab for analyzing video URLs, HTTP metadata, and streaming formats, with a local mock lab for authentication/access-control demonstrations.",
+  "workspaces": [
+    "packages/*",
+    "apps/*"
+  ],
+  "scripts": {
+    "build": "npm run build --workspaces --if-present",
+    "test": "npm run test --workspaces --if-present",
+    "typecheck": "npm run typecheck --workspaces --if-present",
+    "dev:api": "npm run dev -w apps/api",
+    "dev:mock-lab": "npm run dev -w apps/mock-lab",
+    "dev:web": "npm run dev -w apps/web"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}
