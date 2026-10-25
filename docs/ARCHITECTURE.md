@@ -20,11 +20,12 @@
 │                     (still used for the two static demo videos only); src/video/ = Prompt 3's
 │                     upload/HLS chunking pipeline; src/account/ = Prompt 4's real accounts,
 │                     channels, memberships, sessions, and audit log; src/securityTests/ = Prompt
-│                     4's isolated test-fixture runner
+│                     4's isolated test-fixture runner plus Prompt 5's report.ts (JSON/HTML
+│                     report generation from an already-executed run)
 ├─ packages/
 │  └─ security/      Shared, framework-agnostic SSRF/URL-safety guard + IP-pinned safeFetch
 │                     (consumed by apps/api's URL Analysis Engine and manifest-by-URL parsing)
-├─ docs/              This file, SECURITY_MODEL.md, ROADMAP.md
+├─ docs/              This file, SECURITY_MODEL.md, ROADMAP.md, PRESENTATION_GUIDE.md
 └─ .env.example
 ```
 
@@ -190,13 +191,17 @@ audit.record({ type: "security_test.run", detail: "<passed>/<total> passed, ..."
   docs/SECURITY_MODEL.md for why validation-at-one-point-in-time (Prompt 1's
   `validateUrlForAnalysis` alone) wasn't sufficient, and how `safeFetch`'s per-hop IP pinning closes
   that gap.
-- `apps/api` owns orchestration, persistence, and anything exposed to the dashboard. This stage
-  adds `src/analysis/` (HTML metadata extraction + the `analyzeUrl` orchestrator),
-  `src/har/` (HAR types, redaction, parser), and `src/manifest/` (HLS parser, DASH parser, format
-  dispatcher) as new modules *inside this same app*, plus `src/store/analysisStore.ts` alongside
-  the existing `findingsStore.ts` — all sharing the one Fastify instance, logger, and env config.
-  The Security Test Engine (Prompt 4) will be another route group here, not a new service.
-  (One intentional exception: the mock streaming/auth lab stays its own process — see above.)
+- `apps/api` owns orchestration, persistence, and anything exposed to the dashboard. Prompt 2 added
+  `src/analysis/` (HTML metadata extraction + the `analyzeUrl` orchestrator), `src/har/` (HAR types,
+  redaction, parser), and `src/manifest/` (HLS parser, DASH parser, format dispatcher) as new
+  modules *inside this same app* — all sharing the one Fastify instance, logger, and env config.
+  Prompt 5 generalized the one-off `AnalysisStore` into a shared `src/store/historyStore.ts`
+  (`HistoryStore<T>`), then built `HarImportStore`/`ManifestParseStore` on top of it alongside the
+  refactored `AnalysisStore`, so all three analyzer histories persist identically instead of three
+  separate implementations; `src/routes/activity.ts` merges all three into one feed. The pre-Prompt-5
+  `findingsStore.ts` is unchanged and still unused by anything — see docs/SECURITY_MODEL.md.
+  (One intentional exception throughout: the mock streaming/auth lab stays its own process — see
+  above.)
 - `apps/mock-lab` owns every piece of "local, synthetic, safe-to-attack" infrastructure, and as of
   this stage contains **two deliberately separate authorization systems, not one merged model**:
   - `src/auth/` (Prompt 1, untouched): `SyntheticAuth`'s stateless role-JWT + `authorizeVideoAccess()`,
@@ -213,17 +218,28 @@ audit.record({ type: "security_test.run", detail: "<passed>/<total> passed, ..."
   The Prompt 4 Security Testing Engine (`src/securityTests/`) is a *client* of this second system —
   it builds its own isolated fixture app, issues real logins, makes real requests, and records
   expected-vs-actual outcomes; it does not reimplement any auth logic, and it never touches the
-  live server's actual data directory.
+  live server's actual data directory. Prompt 5 added `src/securityTests/report.ts` as a pure
+  function of an already-executed `SecurityTestRun` (JSON/HTML report building, HTML-escaped) — it
+  reads the engine's output, it does not extend or alter the engine itself.
 - `apps/web` owns presentation only. It talks to `apps/api` and `apps/mock-lab` over HTTP exactly
-  the way any external client would; it holds no business logic of its own.
+  the way any external client would; it holds no business logic of its own. Prompt 5 added
+  `SecurityOverview`, `SecurityLabScenarios`, `ReportsPanel`, and `DemoMode` as new components
+  reusing the exact same backend endpoints the Prompt 2–4 components already called — no new API
+  surface was invented for the frontend alone, and `DemoMode` specifically reuses
+  `useAccountSession()`'s real `login()` so the rest of the dashboard visibly reflects whichever
+  synthetic account the demo is driving at each step, rather than maintaining separate demo-only
+  state.
 
 ## What's deliberately not built yet
 
-- No database/ORM — every entity (findings, analysis history, videos, users, channels,
-  memberships, sessions, audit events) is a JSON file on disk, now serialized through an
-  in-process write queue (see "a real bug this caught" in docs/SECURITY_MODEL.md) rather than a
-  real transactional store. Introduced in Prompt 5 if the Findings/Reporting stage needs
-  structured, queryable results; existing store call sites get migrated then, not duplicated.
+- No database/ORM — every entity (findings, analysis/HAR/manifest history, videos, users, channels,
+  memberships, sessions, audit events, security test runs) is a JSON file on disk, written through
+  an in-process write queue plus atomic temp-file + rename (see "a real bug this caught" and its
+  Prompt 5 follow-up in docs/SECURITY_MODEL.md) rather than a real transactional store. Prompt 5
+  — the stage originally expected to introduce PostgreSQL/Prisma if reporting needed structured,
+  queryable storage — shipped the full reporting feature on the existing JSON-store pattern instead;
+  the migration never became necessary once the race-condition fix landed. Revisit only if a future
+  requirement genuinely needs cross-entity queries this pattern can't express, not speculatively.
 - No job queue — URL analysis, HAR import, and manifest parsing run synchronously within a single
   request/response; video *upload* responds immediately (`202`) and processing runs in a detached
   background `Promise` within the same process, which is enough for a local single-user tool.

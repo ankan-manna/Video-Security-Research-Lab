@@ -23,7 +23,11 @@ beforeEach(() => {
 });
 
 function testEnv(overrides: Partial<NodeJS.ProcessEnv> = {}) {
-  return loadEnv({ NODE_ENV: "test", ...overrides } as NodeJS.ProcessEnv);
+  return loadEnv({
+    NODE_ENV: "test",
+    MANIFEST_HISTORY_STORE_PATH: `./data/test-manifest-history-${Math.random().toString(36).slice(2)}.json`,
+    ...overrides,
+  } as NodeJS.ProcessEnv);
 }
 
 describe("POST /api/manifest/parse", () => {
@@ -124,6 +128,22 @@ describe("POST /api/manifest/parse", () => {
     });
     expect(response.statusCode).toBe(400);
     expect(response.json().error).toBe("content_too_large");
+    await app.close();
+  });
+
+  it("persists the parse to history and exposes it via GET /api/manifest/parses", async () => {
+    const env = testEnv();
+    const app = await buildApp(env);
+    await app.inject({
+      method: "POST",
+      url: "/api/manifest/parse",
+      payload: { content: read("hls-master.m3u8") },
+    });
+    const listResponse = await app.inject({ method: "GET", url: "/api/manifest/parses" });
+    expect(listResponse.statusCode).toBe(200);
+    const { parses } = listResponse.json();
+    expect(parses).toHaveLength(1);
+    expect(parses[0].manifest.type).toBe("hls");
     await app.close();
   });
 });

@@ -1,7 +1,9 @@
+import { randomUUID } from "node:crypto";
 import type { FastifyInstance } from "fastify";
 import { z } from "zod";
 import type { Env } from "../env.js";
 import { parseHarFile } from "../har/parser.js";
+import type { HarImportStore } from "../store/harImportStore.js";
 
 const harImportRequestSchema = z.object({
   filename: z.string().optional(),
@@ -17,7 +19,7 @@ const harImportRequestSchema = z.object({
  * processed for a HAR that's within the byte limit but has a pathological
  * entry count.
  */
-export async function harRoutes(app: FastifyInstance, env: Env) {
+export async function harRoutes(app: FastifyInstance, env: Env, harImportStore: HarImportStore) {
   app.post("/api/har/import", { bodyLimit: env.HAR_MAX_UPLOAD_BYTES }, async (request, reply) => {
     const parsed = harImportRequestSchema.safeParse(request.body);
     if (!parsed.success) {
@@ -32,9 +34,22 @@ export async function harRoutes(app: FastifyInstance, env: Env) {
       return reply.status(400).send({ error: "invalid_har", message: outcome.reason });
     }
 
-    return reply.status(200).send({
+    const record = {
+      id: randomUUID(),
       filename: parsed.data.filename ?? null,
+      importedAt: new Date().toISOString(),
+      result: outcome.result,
+    };
+    await harImportStore.append(record);
+
+    return reply.status(200).send({
+      id: record.id,
+      filename: record.filename,
       ...outcome.result,
     });
   });
+
+  app.get("/api/har/imports", async () => ({
+    imports: await harImportStore.list(),
+  }));
 }

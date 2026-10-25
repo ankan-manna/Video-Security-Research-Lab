@@ -127,6 +127,18 @@ extraction, and persistence.
 appropriate for a single-instance research/demo deployment; a multi-instance deployment would need
 a shared store (e.g., Redis), noted here rather than built now since it isn't needed yet.
 
+`apps/mock-lab` had no rate limiting at all through Prompt 4 — a genuine gap surfaced by Prompt 5's
+hardening review. It now registers `@fastify/rate-limit` too, but with `global: false`: the plugin
+only throttles routes that explicitly opt in via `{ config: { rateLimit: {...} } }`, rather than
+every route. This is deliberate, not partial: a global limit would also throttle the Security
+Testing Engine's own rapid-fire `app.inject()` calls against a live server during a real run (19
+checks, several issuing 2–3 requests each, all in well under a second) — legitimate traffic a
+global limit would misclassify as abuse. Only `POST /mock/session/login` opts in (20
+requests/minute) — the one endpoint where bounding request rate is meaningfully protective, since
+it issues a new valid session on every successful call. See
+`apps/mock-lab/test/account/session.test.ts` for the regression tests proving both that the login
+route is actually throttled and that an unrelated route under the same burst isn't.
+
 ## Two authorization systems, on purpose (`apps/mock-lab`)
 
 `apps/mock-lab` contains two separate, never-merged authorization systems:
@@ -310,6 +322,64 @@ This is the same category of lesson as Prompt 2's Happy-Eyeballs bug and Prompt 
 content-type bug: a scenario no single-request unit test exercises (two concurrent background
 operations against the same file-backed store) only surfaced once something actually drove real
 concurrent load through the real pipeline.
+
+### A second real concurrency bug, found live during Prompt 5's own verification
+
+The write queue above fixes concurrent *writes* racing each other, but `list()` (and everything
+built on it — `get()`, `find()`, `findOne()`) was never routed through that queue, since reads must
+stay fast and concurrent with each other. That's correct for ordering, but `writeAll()` wrote with
+a direct `fs.writeFile()`, which truncates the file before writing the new bytes. A `list()` call
+landing in that window — after truncation, before the new bytes finish — read a syntactically
+incomplete file and threw `SyntaxError: Unexpected end of JSON input`, an **uncaught** error that
+surfaced as a bare `500`.
+
+This was not found by reasoning about the code — it was reproduced live, running the actual Guided
+Demo in a real browser against a real running server: clicking "run all remaining steps" fired a
+login (writing `sessions.json`) at nearly the same moment the Security Overview panel's own mount
+effect called `GET /mock/channels/:id/audit` (reading `sessions.json` to resolve the session), and
+the server log showed exactly the torn-read stack trace above, through `SessionStore.resolve()` →
+`JsonStore.get()` → `JsonStore.list()`. The same `writeAll()` pattern existed in
+`apps/mock-lab/src/video/videoStore.ts` and `apps/api/src/store/historyStore.ts`/`findingsStore.ts`
+— fixed identically in all four: write to a sibling temp file, then `fs.rename()` into place.
+`fs.rename()` is atomic on the same filesystem, so a concurrent reader now only ever observes the
+fully-old or fully-new file, never a partial one.
+
+Caught and fixed, not just theorized: `apps/mock-lab/test/account/jsonStore.test.ts`,
+`test/video/videoStore.test.ts`, and `apps/api/test/historyStore.test.ts` each assert the write
+goes through a `.tmp` path followed by a `rename()` — and, reverting the fix locally while writing
+the test, the assertion failed exactly as expected, confirming the test would have caught the
+original bug had it existed first.
+
+## Security reporting and export (`apps/mock-lab/src/securityTests/report.ts`)
+
+`GET /mock/security-tests/report` (JSON or `?format=html`) builds a structured report from a
+**single already-executed** `SecurityTestRun` — it never re-runs anything and never invents a
+result; `buildSecurityReport()` only groups and re-labels fields the engine already produced
+(`findings` from `status: "fail"` results, `verifiedControls` from `status: "pass"` results,
+`notApplicable` from the honestly-reported `not_applicable` ones).
+
+Two things this report deliberately refuses to do, both enforced by test
+(`apps/mock-lab/test/securityTests/report.test.ts`):
+
+- **Never claim the application is secure because the run passed.** Every report carries a fixed
+  disclaimer stating a pass "is not a certification that the application is secure, free of
+  vulnerabilities, or production-ready," and the rest of the report (summary, verified controls,
+  scope) never independently asserts a security conclusion outside that one explicitly-labeled
+  disclaimer.
+- **Escape everything, even data this app wrote itself.** The HTML renderer (`renderSecurityReportHtml()`)
+  passes every interpolated string — titles, evidence, remediation text — through `escapeHtml()`
+  before building the document, rather than trusting that today's test-case definitions happen to
+  be hardcoded, XSS-free strings. This is the one place in the app that builds an HTML document from
+  structured data instead of relying on React's default JSX escaping (confirmed via repo-wide grep:
+  no `dangerouslySetInnerHTML` exists anywhere in `apps/web`), so it gets the same rigor explicitly
+  rather than by accident. Tested by injecting an `<img src=x onerror=...>`-shaped string into a
+  finding and asserting the rendered HTML contains the escaped entities, not the raw tag.
+
+`apps/api/src/store/findingsStore.ts`'s `/api/findings` predates this engine and is **not** a
+second findings source — nothing has ever called `.append()` on it (confirmed by repo-wide grep),
+and it always returns an empty list. It's kept only so existing API consumers don't `404`; the route
+and store now say so explicitly in their own code comments rather than silently implying a feature
+that doesn't exist.
 
 ## HAR import redaction (`apps/api/src/har/`)
 
@@ -538,9 +608,9 @@ an ownership or authorization input) and the file itself goes through format det
   boundary here: a file passes format detection on 4-12 bytes of magic-byte evidence, and FFmpeg —
   a large, independently-maintained C codebase — is what actually parses the rest. This is a known,
   accepted dependency on FFmpeg's own hardening, not a gap this project's own code closes.
-- No rate limiting specific to uploads or transcoding (the general `@fastify/rate-limit` on
-  `apps/api` doesn't apply to `apps/mock-lab` at all) — a local single-user tool has no competing
-  tenants to protect from each other; revisit if that assumption ever changes.
+- No rate limiting on uploads, transcoding, or any `apps/mock-lab` route other than
+  `POST /mock/session/login` (see "Rate limiting and abuse resistance" above) — a local single-user
+  tool has no competing tenants to protect from each other; revisit if that assumption ever changes.
 - No limit on concurrent in-flight transcodes — `processor.ts`'s `inFlight` set only prevents the
   *same* video id from being processed twice concurrently, not a cap on how many *different*
   uploads can transcode at once. Fine for manual local testing; would need a queue (Prompt 4+'s

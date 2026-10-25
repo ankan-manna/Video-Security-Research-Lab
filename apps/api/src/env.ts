@@ -20,8 +20,12 @@ const envSchema = z.object({
 
   HAR_MAX_UPLOAD_BYTES: z.coerce.number().int().positive().default(5_000_000),
   HAR_MAX_ENTRIES: z.coerce.number().int().positive().default(1000),
+  HAR_HISTORY_STORE_PATH: z.string().default("./data/har-history.json"),
+  HAR_HISTORY_MAX_ENTRIES: z.coerce.number().int().positive().default(50),
 
   MANIFEST_MAX_CONTENT_BYTES: z.coerce.number().int().positive().default(1_000_000),
+  MANIFEST_HISTORY_STORE_PATH: z.string().default("./data/manifest-history.json"),
+  MANIFEST_HISTORY_MAX_ENTRIES: z.coerce.number().int().positive().default(50),
 });
 
 export type Env = z.infer<typeof envSchema>;

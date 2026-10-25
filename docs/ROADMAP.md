@@ -144,25 +144,87 @@ lives in `apps/mock-lab/src/account/` and `src/securityTests/`.
   `status: "ready"` update (a lost-update read-modify-write race). Fixed with an in-process write
   queue added to both `VideoStore` and the shared `JsonStore` — see `docs/SECURITY_MODEL.md`.
 
-## Prompt 5 — Dashboard polish, reporting, integration tests, demonstration docs
+## Prompt 5 — Final integration, hacker-style dashboard, and security showcase ✅
 
-- **Findings and Reporting**: translate Security Testing Engine runs (already expected-vs-actual,
-  severity, remediation per `docs/SECURITY_MODEL.md`) into a readable report view — reproduction
-  steps, impact, a print/export-friendly layout — rather than building a second, separate findings
-  pipeline. `FindingsStore` (Prompt 1, currently unused by anything) is the natural landing spot if
-  a persisted "findings" concept distinct from raw test runs turns out to be needed.
-- Dashboard polish: interactive results visualizations (Recharts), refined hacker-style UI
-  consistency across all views built in Prompts 2–4.
-- **Playwright** end-to-end tests covering the full G1/G2 workflow: upload → configure visibility
-  and price → G2 browses → simulated-payment activation → protected playback → creator audit
-  review → security test run. This is intentionally the first stage with Playwright, not Prompt 1
-  — end-to-end coverage needs the full workflow to exist first.
-- CI (GitHub Actions): expand beyond install/build/unit-test to include the Playwright suite.
-- Demonstration documentation for the college showcase (what to click through, what each panel
-  proves, suggested live-demo script using the G1/G2 flow already built).
-- Introduce **PostgreSQL + Prisma** here, only if the reporting view genuinely needs structured,
-  queryable storage beyond what the existing JSON stores provide — not assumed in advance, per the
-  "add only when needed" engineering principle carried through every prior stage.
+Audited the existing implementation before changing anything (179/179 tests passing, clean
+typecheck, no `dangerouslySetInnerHTML`, no stray TODOs — but `FindingsStore` confirmed orphaned and
+no HAR/manifest history persisted), then built the integration layer the first four prompts
+deliberately left out, rather than re-touching what already worked.
+
+- **HAR/manifest history persistence**: two new stores (`HarImportStore`, `ManifestParseStore`) on
+  top of a new shared `HistoryStore<T>` (`apps/api/src/store/historyStore.ts`) that `AnalysisStore`
+  was also refactored onto, so all three analyzer histories persist identically. A new
+  `GET /api/activity` merges all three into one timestamp-sorted feed for the dashboard.
+- **Security Overview**: aggregates real, already-persisted data only — latest Security Testing
+  Engine run summary, findings by severity, video processing status, channels/membership, and recent
+  URL/HAR/manifest analyses — each panel explicitly labeled with the endpoint it reflects. No panel
+  computes or fabricates a number the backend didn't already return.
+- **Interactive Security Lab**: the six named scenarios from the project vision (G1 own-video
+  access, G2 post-activation access, non-member denial, revoked-member denial, expired-session
+  denial, cross-channel denial), each mapped to real Security Testing Engine case IDs rather than a
+  second, frontend-only test implementation. Explicit attack-vs-defense framing: a scenario that
+  simulates an attack and gets correctly blocked is labeled "defense test passed," never conflated
+  with a scenario proving legitimate access works.
+- **Security reporting**: `apps/mock-lab/src/securityTests/report.ts` builds a JSON/HTML report from
+  an already-executed run — findings, verified controls, not-applicable cases, scope/limitations,
+  and a disclaimer that a pass is never a security certification. The HTML renderer escapes every
+  interpolated value. `FindingsStore`'s orphaned status is now stated explicitly in its own code
+  comments rather than left implicit.
+- **Guided demo mode**: a deterministic, 11-step walkthrough (`apps/web/components/DemoMode.tsx`)
+  driving only real APIs — G1 login, members-only upload, G2 denial, simulated ₹1 activation,
+  protected playback, revocation, the full security suite, report generation — with a reset action
+  that deletes the demo's own video and clears its own membership state, verified repeatable twice
+  in a row in a live browser.
+- **Dashboard navigation**: a sticky anchor nav (Overview / Research Workspace / Streaming Lab /
+  Membership & Sessions / Security Lab / Reports / Guided Demo) replacing the Prompt 1–4 single
+  scrolling page, reusing the existing Tailwind design system rather than introducing a new one.
+- **Hardening, found and fixed via live testing, not just review**:
+  - A real torn-read race condition (`SyntaxError: Unexpected end of JSON input`, surfacing as a bare
+    `500`) in every JSON-file store across both backends, reproduced by literally running the Guided
+    Demo against a live server. Fixed with atomic temp-file + `fs.rename()` writes in `JsonStore`,
+    `VideoStore`, and `HistoryStore`/`FindingsStore`; regression tests confirm the fix (and fail
+    without it).
+  - `apps/mock-lab` had zero rate limiting through Prompt 4. Added `@fastify/rate-limit` with
+    `global: false`, opted into only by `POST /mock/session/login` — global limiting would have
+    throttled the Security Testing Engine's own legitimate rapid-fire traffic.
+  - A stale-data bug where triggering a security test run from one panel (e.g. the demo) didn't
+    refresh the Overview/Reports/Lab panels that also read the same data — fixed with a small shared
+    DOM event, verified live (no reload) across panels.
+  - A React key-prop warning and a scope-corrupting `prettier --write` run on an unrelated file
+    (reverted and reapplied as a minimal targeted diff) — both caught and fixed during this stage's
+    own verification.
+- Final verification: **200/200 tests passing** (34 `packages/security` + 55 `apps/api` + 111
+  `apps/mock-lab`), clean typecheck across all four workspaces, clean production build, and the full
+  11-step demo run twice end-to-end in a real browser against real local servers — see the
+  [completion summary](#prompt-5-completion-summary) below for exactly what was and wasn't verified.
+- **Not built**: Playwright/automated browser tests for `apps/web` (verification here was live,
+  manual, browser-driven — not automated and not re-runnable as a CI gate); PostgreSQL/Prisma
+  migration (never became necessary — the JSON-store-plus-atomic-write pattern, once the race
+  condition was fixed, was sufficient for every Prompt 5 requirement).
+
+### Prompt 5 completion summary
+
+**Implemented and verified** (automated tests + live browser runs): HAR/manifest history
+persistence and the merged activity feed; the Security Overview; the Interactive Security Lab's six
+scenarios; JSON/HTML security report generation and download; the 11-step guided demo including
+reset/repeatability; dashboard navigation; the torn-read race-condition fix; the login rate limit;
+the cross-panel live-refresh fix.
+
+**Implemented and typecheck/build-clean, but only spot-checked live (not covered by an automated
+test)**: the exact visual/responsive layout at mobile/tablet breakpoints; the HTML report's
+rendered appearance in a real browser (its *content correctness and escaping* is test-covered; its
+*visual rendering* was eyeballed once via `curl`, not screenshotted at every breakpoint).
+
+**Known incomplete, stated plainly rather than glossed over**: no automated end-to-end test suite
+for `apps/web` (Playwright was never added in any prompt); no PostgreSQL/Prisma migration (the
+JSON-store pattern, once fixed, remained sufficient); no rate limiting beyond the one login route in
+`apps/mock-lab`; the pre-existing limitations list in `docs/SECURITY_MODEL.md`'s "Threats explicitly
+out of scope" section is unchanged except where this stage's own changes affected it.
+
+**Never claimed**: that any amount of testing performed in this stage constitutes a comprehensive
+penetration test, a production-readiness certification, or proof of security beyond the specific,
+listed scenarios actually executed — consistent with every report and disclaimer this stage
+generates.
 
 ## Explicit non-goals (every stage)
 

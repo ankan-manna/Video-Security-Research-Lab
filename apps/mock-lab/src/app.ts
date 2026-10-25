@@ -3,6 +3,7 @@ import Fastify, { type FastifyBaseLogger, type FastifyInstance } from "fastify";
 import cors from "@fastify/cors";
 import cookie from "@fastify/cookie";
 import multipart from "@fastify/multipart";
+import rateLimit from "@fastify/rate-limit";
 import { SyntheticAuth } from "./auth/syntheticAuth.js";
 import { authRoutes } from "./routes/auth.js";
 import { manifestRoutes } from "./routes/manifest.js";
@@ -78,6 +79,13 @@ export async function buildMockLabApp(
       files: 1,
     },
   });
+
+  // global: false — only routes that opt in via `config.rateLimit` are limited. A global
+  // limit would also throttle the Security Testing Engine's own rapid-fire app.inject()
+  // calls against a live server, which is legitimate traffic, not abuse. Opted-in here:
+  // the login endpoint, the one meaningfully brute-forceable/credential-stuffing-relevant
+  // surface (see routes/session.ts) — previously unprotected (see docs/SECURITY_MODEL.md).
+  await app.register(rateLimit, { global: false });
 
   app.get("/health", async () => ({
     status: "ok",

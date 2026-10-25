@@ -96,8 +96,25 @@ export class JsonStore<T extends { id: string }> {
     });
   }
 
+  /**
+   * Writes via a temp file + atomic rename rather than a direct writeFile.
+   * `list()` (and everything built on it — get/find/findOne) is never
+   * routed through the write queue, since reads must stay fast and
+   * concurrent with each other; that means a read can always land
+   * mid-write. A direct writeFile truncates the file before writing the
+   * new bytes, so a concurrent read can observe a partially-written file
+   * and throw "Unexpected end of JSON input" (reproduced live: GET
+   * /mock/channels/:id/audit 500'd this way while a login was mid-write
+   * to sessions.json). fs.rename is atomic on the same filesystem, so a
+   * concurrent reader now only ever sees the fully-old or fully-new file.
+   */
   private async writeAll(items: T[]): Promise<void> {
     await fs.mkdir(path.dirname(this.filePath), { recursive: true });
-    await fs.writeFile(this.filePath, JSON.stringify(items, null, 2), "utf8");
+    const tmpPath = path.join(
+      path.dirname(this.filePath),
+      `.${path.basename(this.filePath)}.${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2)}.tmp`,
+    );
+    await fs.writeFile(tmpPath, JSON.stringify(items, null, 2), "utf8");
+    await fs.rename(tmpPath, this.filePath);
   }
 }

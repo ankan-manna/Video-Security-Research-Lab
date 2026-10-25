@@ -9,7 +9,11 @@ const here = path.dirname(fileURLToPath(import.meta.url));
 const sampleHar = JSON.parse(readFileSync(path.join(here, "fixtures/sample.har"), "utf8"));
 
 function testEnv(overrides: Partial<NodeJS.ProcessEnv> = {}) {
-  return loadEnv({ NODE_ENV: "test", ...overrides } as NodeJS.ProcessEnv);
+  return loadEnv({
+    NODE_ENV: "test",
+    HAR_HISTORY_STORE_PATH: `./data/test-har-history-${Math.random().toString(36).slice(2)}.json`,
+    ...overrides,
+  } as NodeJS.ProcessEnv);
 }
 
 describe("POST /api/har/import", () => {
@@ -27,6 +31,23 @@ describe("POST /api/har/import", () => {
     expect(body.redactedFieldCount).toBeGreaterThan(0);
     const serialized = JSON.stringify(body);
     expect(serialized).not.toContain("supersecret");
+    await app.close();
+  });
+
+  it("persists the import to history and exposes it via GET /api/har/imports", async () => {
+    const env = testEnv();
+    const app = await buildApp(env);
+    await app.inject({
+      method: "POST",
+      url: "/api/har/import",
+      payload: { filename: "capture.har", har: sampleHar },
+    });
+    const listResponse = await app.inject({ method: "GET", url: "/api/har/imports" });
+    expect(listResponse.statusCode).toBe(200);
+    const { imports } = listResponse.json();
+    expect(imports).toHaveLength(1);
+    expect(imports[0].filename).toBe("capture.har");
+    expect(JSON.stringify(imports)).not.toContain("supersecret");
     await app.close();
   });
 

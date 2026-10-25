@@ -16,56 +16,63 @@ const loginSchema = z.object({
  * instead of a stateless role token.
  */
 export async function sessionRoutes(app: FastifyInstance, ctx: AccountContext) {
-  app.post("/mock/session/login", async (request, reply) => {
-    const parsed = loginSchema.safeParse(request.body);
-    if (!parsed.success) {
-      return reply.status(400).send({
-        error: "invalid_request",
-        message: parsed.error.issues.map((issue) => issue.message).join("; "),
-      });
-    }
+  app.post(
+    "/mock/session/login",
+    // Rate-limited (previously unprotected): bounds how fast a caller can probe account
+    // labels or exhaust server resources issuing sessions. The rate-limit plugin is
+    // registered with `global: false` in app.ts, so only this route is throttled.
+    { config: { rateLimit: { max: 20, timeWindow: "1 minute" } } },
+    async (request, reply) => {
+      const parsed = loginSchema.safeParse(request.body);
+      if (!parsed.success) {
+        return reply.status(400).send({
+          error: "invalid_request",
+          message: parsed.error.issues.map((issue) => issue.message).join("; "),
+        });
+      }
 
-    const user = await ctx.userStore.findByLabel(parsed.data.accountLabel);
-    if (!user) {
+      const user = await ctx.userStore.findByLabel(parsed.data.accountLabel);
+      if (!user) {
+        await ctx.auditStore.record({
+          type: "auth.login.failure",
+          actorUserId: null,
+          actorSessionFingerprint: null,
+          outcome: "failure",
+          detail: `Login failed: unknown test account label "${parsed.data.accountLabel}".`,
+        });
+        return reply.status(401).send({ error: "unknown_account", message: "No such local test account." });
+      }
+
+      // Rotation: if the caller already presented a valid session, retire it rather than letting
+      // two live sessions for the same login call coexist.
+      const existing = await resolveActor(request, ctx.sessionStore);
+      if (existing.resolution.kind === "ok") {
+        await ctx.sessionStore.revoke(existing.resolution.session.tokenHash);
+      }
+
+      const { token, session } = await ctx.sessionStore.create(user.id);
+      const csrfToken = generateCsrfToken();
+      setSessionCookies(reply, token, csrfToken, {
+        isProduction: ctx.isProduction,
+        ttlSeconds: ctx.sessionTtlSeconds,
+      });
+
       await ctx.auditStore.record({
-        type: "auth.login.failure",
-        actorUserId: null,
-        actorSessionFingerprint: null,
-        outcome: "failure",
-        detail: `Login failed: unknown test account label "${parsed.data.accountLabel}".`,
+        type: "auth.login.success",
+        actorUserId: user.id,
+        actorSessionFingerprint: sessionFingerprint(session.tokenHash),
+        outcome: "success",
+        detail: `Login succeeded for account "${user.label}".`,
       });
-      return reply.status(401).send({ error: "unknown_account", message: "No such local test account." });
-    }
 
-    // Rotation: if the caller already presented a valid session, retire it rather than letting
-    // two live sessions for the same login call coexist.
-    const existing = await resolveActor(request, ctx.sessionStore);
-    if (existing.resolution.kind === "ok") {
-      await ctx.sessionStore.revoke(existing.resolution.session.tokenHash);
-    }
-
-    const { token, session } = await ctx.sessionStore.create(user.id);
-    const csrfToken = generateCsrfToken();
-    setSessionCookies(reply, token, csrfToken, {
-      isProduction: ctx.isProduction,
-      ttlSeconds: ctx.sessionTtlSeconds,
-    });
-
-    await ctx.auditStore.record({
-      type: "auth.login.success",
-      actorUserId: user.id,
-      actorSessionFingerprint: sessionFingerprint(session.tokenHash),
-      outcome: "success",
-      detail: `Login succeeded for account "${user.label}".`,
-    });
-
-    return reply.send({
-      token,
-      csrfToken,
-      user: { id: user.id, label: user.label, displayName: user.displayName },
-      expiresAt: session.expiresAt,
-    });
-  });
+      return reply.send({
+        token,
+        csrfToken,
+        user: { id: user.id, label: user.label, displayName: user.displayName },
+        expiresAt: session.expiresAt,
+      });
+    },
+  );
 
   app.post("/mock/session/logout", async (request, reply) => {
     const { resolution, authMethod } = await resolveActor(request, ctx.sessionStore);

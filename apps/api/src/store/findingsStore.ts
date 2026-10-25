@@ -34,6 +34,11 @@ export class FindingsStore {
     const existing = await this.list();
     existing.push(finding);
     await fs.mkdir(path.dirname(this.filePath), { recursive: true });
-    await fs.writeFile(this.filePath, JSON.stringify(existing, null, 2), "utf8");
+    const tmpPath = path.join(
+      path.dirname(this.filePath),
+      `.${path.basename(this.filePath)}.${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2)}.tmp`,
+    );
+    await fs.writeFile(tmpPath, JSON.stringify(existing, null, 2), "utf8");
+    await fs.rename(tmpPath, this.filePath);
   }
 }

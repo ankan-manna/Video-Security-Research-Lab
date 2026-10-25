@@ -5,6 +5,7 @@ import { resolveActor } from "../account/sessionAuth.js";
 import { sessionFingerprint } from "../account/sessionTokens.js";
 import { runSecurityTests } from "../securityTests/runner.js";
 import { SecurityTestResultsStore } from "../securityTests/resultsStore.js";
+import { buildSecurityReport, renderSecurityReportHtml } from "../securityTests/report.js";
 
 /**
  * Triggers the Security Testing Engine (securityTests/runner.ts) against a
@@ -37,5 +38,32 @@ export async function securityTestRoutes(app: FastifyInstance, ctx: AccountConte
   app.get("/mock/security-tests/results", async (_request, reply) => {
     const runs = await resultsStore.list();
     return reply.send({ runs });
+  });
+
+  app.get("/mock/security-tests/report", async (request, reply) => {
+    const query = request.query as { runId?: string; format?: string };
+    const runs = await resultsStore.list();
+    const run = query.runId ? runs.find((r) => r.id === query.runId) : runs[0];
+
+    if (!run) {
+      return reply.status(404).send({
+        error: "no_run_found",
+        message: query.runId
+          ? `No security test run with id "${query.runId}".`
+          : "No security test runs have been recorded yet. Run the security tests first.",
+      });
+    }
+
+    const report = buildSecurityReport(run);
+
+    if (query.format === "html") {
+      reply.header("Content-Type", "text/html; charset=utf-8");
+      reply.header("Content-Disposition", `attachment; filename="security-report-${run.id}.html"`);
+      return reply.send(renderSecurityReportHtml(report));
+    }
+
+    reply.header("Content-Type", "application/json");
+    reply.header("Content-Disposition", `attachment; filename="security-report-${run.id}.json"`);
+    return reply.send(report);
   });
 }

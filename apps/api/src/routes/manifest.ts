@@ -1,8 +1,10 @@
+import { randomUUID } from "node:crypto";
 import type { FastifyInstance } from "fastify";
 import { z } from "zod";
 import { safeFetch } from "@research-lab/security";
 import type { Env } from "../env.js";
 import { analyzeManifestText } from "../manifest/analyzeManifest.js";
+import type { ManifestParseStore } from "../store/manifestParseStore.js";
 
 const manifestParseRequestSchema = z
   .object({
@@ -21,7 +23,7 @@ const manifestParseRequestSchema = z
  * way, parsing never downloads anything the manifest merely *references*
  * (segments, keys, license servers) — only the manifest document itself.
  */
-export async function manifestRoutes(app: FastifyInstance, env: Env) {
+export async function manifestRoutes(app: FastifyInstance, env: Env, manifestParseStore: ManifestParseStore) {
   app.post(
     "/api/manifest/parse",
     { bodyLimit: env.MANIFEST_MAX_CONTENT_BYTES + 4096 },
@@ -67,7 +69,19 @@ export async function manifestRoutes(app: FastifyInstance, env: Env) {
         return reply.status(422).send({ error: "unsupported_manifest", message: outcome.reason });
       }
 
-      return reply.status(200).send({ source, manifest: outcome.result });
+      const record = {
+        id: randomUUID(),
+        source,
+        parsedAt: new Date().toISOString(),
+        manifest: outcome.result,
+      };
+      await manifestParseStore.append(record);
+
+      return reply.status(200).send({ id: record.id, source, manifest: outcome.result });
     },
   );
+
+  app.get("/api/manifest/parses", async () => ({
+    parses: await manifestParseStore.list(),
+  }));
 }

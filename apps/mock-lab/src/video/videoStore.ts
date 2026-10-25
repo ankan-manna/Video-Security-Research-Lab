@@ -81,8 +81,24 @@ export class VideoStore {
     });
   }
 
+  /**
+   * Writes via a temp file + atomic rename, not a direct writeFile. `list()`
+   * (and `get()`) are never routed through the write queue — reads must
+   * stay concurrent with each other — so a read can land mid-write. A
+   * direct writeFile truncates before writing the new bytes, letting a
+   * concurrent read observe a partially-written file and throw
+   * "Unexpected end of JSON input" (the same class of bug the write queue
+   * above fixed for lost updates, but on the read side). fs.rename is
+   * atomic on the same filesystem, so a concurrent reader now only ever
+   * sees the fully-old or fully-new file.
+   */
   private async writeAll(records: VideoRecord[]): Promise<void> {
     await fs.mkdir(path.dirname(this.filePath), { recursive: true });
-    await fs.writeFile(this.filePath, JSON.stringify(records, null, 2), "utf8");
+    const tmpPath = path.join(
+      path.dirname(this.filePath),
+      `.${path.basename(this.filePath)}.${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2)}.tmp`,
+    );
+    await fs.writeFile(tmpPath, JSON.stringify(records, null, 2), "utf8");
+    await fs.rename(tmpPath, this.filePath);
   }
 }

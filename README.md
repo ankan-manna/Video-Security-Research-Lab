@@ -11,8 +11,10 @@ repository's source, database, APIs, or infrastructure. It takes a video URL and
 data (page metadata, HTTP headers, user-supplied HAR files, publicly reachable manifests, and the
 user's own local test videos) as input.
 
-> Stage: **Prompt 4 of 5 — membership authorization and the security testing engine.**
-> See [docs/ROADMAP.md](docs/ROADMAP.md) for the full build plan and what's implemented so far.
+> Stage: **Prompt 5 of 5 — final integration, hacker-style dashboard, and security showcase.
+> Complete.** See [docs/ROADMAP.md](docs/ROADMAP.md) for the full build plan, and
+> [docs/PRESENTATION_GUIDE.md](docs/PRESENTATION_GUIDE.md) for a ready-to-run college
+> demonstration script.
 
 ## What this is not
 
@@ -30,11 +32,13 @@ user's own local test videos) as input.
 ## Architecture at a glance
 
 ```
-apps/web        Next.js dashboard (dark/hacker-style UI)
-apps/api        Fastify backend: URL analysis, HAR import, manifest parsing, findings, rate limiting
+apps/web        Next.js dashboard (dark/hacker-style UI): Overview, Research Workspace, Streaming
+                Lab, Membership & Sessions, Security Lab, Reports, Guided Demo
+apps/api        Fastify backend: URL analysis, HAR import, manifest parsing, a merged activity feed,
+                findings (orphaned — see docs/SECURITY_MODEL.md), rate limiting
 apps/mock-lab   Fastify mock streaming + account/channel/membership system: video upload, FFmpeg->HLS
-                chunking, manifest/segment delivery with HTTP range support, and a self-contained
-                Security Testing Engine
+                chunking, manifest/segment delivery with HTTP range support, a self-contained
+                Security Testing Engine, and JSON/HTML security report generation
 packages/security  Shared SSRF/allowlist URL-safety guard + IP-pinned safe-fetch, used by apps/api
 ```
 
@@ -71,8 +75,14 @@ npm run dev:mock-lab   # Mock streaming lab   -> http://localhost:4002
 npm run dev:web        # Next.js dashboard    -> http://localhost:3000
 ```
 
-Open `http://localhost:3000` once all three are running and scroll to **Local Video Chunking,
-Membership & Security Testing Lab**. A full walkthrough:
+Open `http://localhost:3000` once all three are running. The dashboard is one page with a sticky
+nav — **Overview / Research Workspace / Streaming Lab / Membership & Sessions / Security Lab /
+Reports / Guided Demo**. For the fastest way to see everything working end to end, jump straight to
+**Guided Demo** and click "run all remaining steps" — it drives the exact 11-step walkthrough below
+through real APIs with its own G1/G2 accounts, and "reset demo" cleans up afterward so it's safe to
+run again. See [docs/PRESENTATION_GUIDE.md](docs/PRESENTATION_GUIDE.md) for the narrated version.
+
+Manually, the same story:
 
 1. **Log in as G1** (Account Session). Upload a small MP4/WebM as `members-only` — G1's channel
    and a ₹1.00 (simulated) membership plan already exist from the seed.
@@ -84,9 +94,15 @@ Membership & Security Testing Lab**. A full walkthrough:
    token automatically.
 5. Back as **G1**, open **Creator Panel** to see G2 listed as an active member, adjust the ₹
    price, revoke G2, or review the channel's **audit log**.
-6. Click **run security tests** (Security Testing Engine) to execute all 19 predefined checks —
+6. In **Security Lab**, click **run security tests** to execute all 19 predefined checks —
    authentication, authorization/IDOR, membership lifecycle, streaming security — against a
-   freshly built, fully isolated fixture instance, with real expected-vs-actual results.
+   freshly built, fully isolated fixture instance, with real expected-vs-actual results. The
+   **Interactive Security Lab** below it narrates six of those same results as named attack/defense
+   scenarios.
+7. In **Overview**, see all of the above aggregated — test summary, findings by severity, video
+   status, recent analyses — each panel labeled with exactly which endpoint it reflects.
+8. In **Reports**, download the JSON or HTML security report for any past run — redacted,
+   escaped, and explicit that a pass is not a security certification.
 
 ## Running tests
 
@@ -95,12 +111,18 @@ npm test
 ```
 
 This runs the Vitest suites in `packages/security`, `apps/api`, and `apps/mock-lab` via npm
-workspaces — **179 tests, all passing** as of this stage (34 + 48 + 97). `apps/mock-lab`'s video
+workspaces — **200 tests, all passing** as of this stage (34 + 55 + 111). `apps/mock-lab`'s video
 pipeline and Security Testing Engine tests invoke **real FFmpeg** against small synthetic fixtures
 (generated once via `ffmpeg -f lavfi`, committed under `apps/mock-lab/test/fixtures/`) rather than
 mocking it — FFmpeg must be installed to run `npm test` for that workspace (see Requirements above;
-CI installs it automatically). (`apps/web` has no automated tests yet — end-to-end/integration
-tests are explicitly scoped to Prompt 5 in the roadmap.)
+CI installs it automatically).
+
+`apps/web` has no automated test suite (no Playwright/Vitest-in-browser tests exist in this repo —
+stated here plainly rather than implied). Its correctness for this stage was verified live: running
+the production build, starting all three services from a clean environment, and driving the full
+11-step Guided Demo twice in a real browser against real local servers (including the reset flow,
+confirming repeatability). See [docs/ROADMAP.md](docs/ROADMAP.md)'s Prompt 5 completion summary for
+exactly what that covered and what it didn't.
 
 ## Backend API reference
 
@@ -112,9 +134,12 @@ tests are explicitly scoped to Prompt 5 in the roadmap.)
 | `POST` | `/api/analyze` | Runs the URL Analysis Engine: SSRF-guarded fetch + HTML metadata extraction. Persists the result. |
 | `GET` | `/api/analyses` | Lists recent analysis history (newest first, capped). |
 | `GET` | `/api/analyses/:id` | Retrieves one stored analysis result. |
-| `POST` | `/api/har/import` | Imports and sanitizes a HAR (HTTP Archive) capture. |
-| `POST` | `/api/manifest/parse` | Parses HLS or DASH manifest text, either pasted directly or fetched by URL. |
-| `GET` | `/api/findings` | Security findings store (populated starting Prompt 5's reporting stage). |
+| `POST` | `/api/har/import` | Imports and sanitizes a HAR (HTTP Archive) capture. Persists the result. |
+| `GET` | `/api/har/imports` | Lists recent HAR import history (newest first, capped). |
+| `POST` | `/api/manifest/parse` | Parses HLS or DASH manifest text, either pasted directly or fetched by URL. Persists the result. |
+| `GET` | `/api/manifest/parses` | Lists recent manifest parse history (newest first, capped). |
+| `GET` | `/api/activity` | Merges URL/HAR/manifest history into one timestamp-sorted feed for the dashboard's Security Overview. |
+| `GET` | `/api/findings` | Always empty — orphaned since Prompt 1, nothing ever writes to it. Real findings come from the Security Testing Engine's reports (`GET /mock/security-tests/report`); see docs/SECURITY_MODEL.md. |
 
 ### `apps/mock-lab` — legacy role auth + streaming (Prompt 1/3)
 
@@ -158,11 +183,32 @@ tests are explicitly scoped to Prompt 5 in the roadmap.)
 |---|---|---|
 | `POST` | `/mock/security-tests/run` | Executes all 19 predefined checks against a fresh, fully isolated fixture app and returns the full result set. |
 | `GET` | `/mock/security-tests/results` | Retrieves recent persisted runs (most recent first). |
+| `GET` | `/mock/security-tests/report` | Builds a JSON (default) or HTML (`?format=html`) report from a past run (`?runId=`, defaults to latest). Escaped, redacted, downloadable (`Content-Disposition: attachment`). |
 
 Full request/response shapes, status-code mapping, and configuration:
 [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
 
-## What's implemented in this stage (Prompt 4)
+## What's new in Prompt 5 (final integration)
+
+- **Security Overview** aggregating real, already-persisted data from both backends — security test
+  summary, findings by severity, video processing status, channels/membership, recent URL/HAR/
+  manifest analyses — each panel labeled with the exact endpoint it reflects.
+- **Interactive Security Lab** — the project vision's six named scenarios, each mapped to a real
+  Security Testing Engine case id (no second, frontend-only test implementation), with explicit
+  attack-vs-defense framing.
+- **Security reporting** — downloadable JSON/HTML reports per test run, redacted and
+  HTML-escaped, carrying an explicit "not a security certification" disclaimer.
+- **Guided Demo** — a deterministic, repeatable 11-step walkthrough using only real local APIs and
+  synthetic G1/G2 accounts, with a reset action for clean re-runs.
+- **HAR/manifest history persistence** and a merged `/api/activity` feed (previously only URL
+  analyses persisted).
+- **Hardening**: fixed a real cross-store torn-read race condition (atomic temp-file + rename
+  writes), added rate limiting to the previously-unprotected login endpoint, fixed a cross-panel
+  stale-data bug. All with regression tests — see docs/SECURITY_MODEL.md and docs/ROADMAP.md.
+
+Full detail: [docs/ROADMAP.md](docs/ROADMAP.md)'s Prompt 5 section and completion summary.
+
+## What was implemented in Prompt 4 (membership authorization and the security testing engine)
 
 - **Synthetic accounts, channels, and memberships** (`apps/mock-lab/src/account/`) — two seeded
   local test accounts (G1 — Creator, G2 — Member), a channel auto-created for whoever uploads a
@@ -232,12 +278,16 @@ Failed/interrupted processing never leaves a partial `hls/` directory in place.
   token instead, documented explicitly rather than silently worked around.
 - Single rendition only — every uploaded video produces one HLS quality level, not a multi-bitrate
   ABR ladder.
-- No rate limiting on `apps/mock-lab` and no cap on concurrent transcodes — acceptable for a local,
-  single-user research tool.
+- `apps/mock-lab` rate-limits only `POST /mock/session/login` (20/minute); no other route there is
+  rate-limited and there's no cap on concurrent transcodes — acceptable for a local, single-user
+  research tool. See docs/SECURITY_MODEL.md.
+- No automated end-to-end test suite for `apps/web` — this stage's dashboard/demo-flow correctness
+  was verified live in a real browser, not via an automated, CI-runnable suite.
 
-## Next step
+## Project status
 
-Prompt 5: dashboard polish, a Findings/Reporting view translating Security Testing Engine runs into
-reproduction-steps/impact/severity/remediation reports, Playwright end-to-end coverage of the full
-G1/G2 demo workflow, and the PostgreSQL/Prisma migration if structured reporting needs it. See
-[docs/ROADMAP.md](docs/ROADMAP.md).
+All five prompts are complete. See [docs/ROADMAP.md](docs/ROADMAP.md) for the full build history
+and the Prompt 5 completion summary (what's implemented, tested, spot-checked, or explicitly left
+incomplete), and [docs/PRESENTATION_GUIDE.md](docs/PRESENTATION_GUIDE.md) for a ready-to-run college
+demonstration script covering the problem, architecture, threat model, security controls, attack
+simulations, test results, and limitations.

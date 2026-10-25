@@ -190,4 +190,28 @@ describe("CSRF protection for cookie-authenticated requests", () => {
 
     await app.close();
   });
+
+  it("rate-limits repeated login attempts (previously unprotected — see app.ts)", async () => {
+    const app = await buildApp();
+    const responses = [];
+    for (let i = 0; i < 21; i++) {
+      responses.push(await app.inject({ method: "POST", url: "/mock/session/login", payload: { accountLabel: "G1" } }));
+    }
+    const limited = responses.filter((r) => r.statusCode === 429);
+    expect(limited.length).toBeGreaterThan(0);
+    expect(responses[0]!.statusCode).toBe(200);
+
+    await app.close();
+  });
+
+  it("does not rate-limit unrelated routes under the same threshold (global: false scoping)", async () => {
+    const app = await buildApp();
+    const responses = [];
+    for (let i = 0; i < 25; i++) {
+      responses.push(await app.inject({ method: "GET", url: "/mock/session/me" }));
+    }
+    expect(responses.every((r) => r.statusCode === 200)).toBe(true);
+
+    await app.close();
+  });
 });

@@ -3,6 +3,7 @@
 import { Fragment, useCallback, useEffect, useState } from "react";
 import { MOCK_LAB_BASE_URL } from "@/lib/config";
 import { useAccountSession } from "@/lib/accountSession";
+import { SECURITY_TEST_RUN_EVENT, notifySecurityTestRunUpdated } from "@/lib/events";
 import { StatusBadge, type BadgeKind } from "./StatusBadge";
 
 interface TestCaseResult {
@@ -62,6 +63,8 @@ export function SecurityTestRunner() {
 
   useEffect(() => {
     loadLatest();
+    window.addEventListener(SECURITY_TEST_RUN_EVENT, loadLatest);
+    return () => window.removeEventListener(SECURITY_TEST_RUN_EVENT, loadLatest);
   }, [loadLatest]);
 
   async function runTests() {
@@ -77,6 +80,7 @@ export function SecurityTestRunner() {
         return;
       }
       setRun(await response.json());
+      notifySecurityTestRunUpdated();
     } catch {
       setError("Could not reach the mock lab.");
     } finally {
