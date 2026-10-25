@@ -7,7 +7,7 @@ import { attachManifestCapture } from "../../src/evidence/manifestCapture.js";
 import { EvidenceStore } from "../../src/evidence/store.js";
 import { NetworkObserver } from "../../src/network/observer.js";
 import { startFixtureServer, type FixtureServerHandle } from "../helpers/fixtureServer.js";
-import type { ManifestRecord } from "../../src/evidence/types.js";
+import type { ManifestRecord, ManifestParseFailure } from "../../src/evidence/types.js";
 
 let profileDir: string;
 let fixture: FixtureServerHandle;
@@ -30,13 +30,14 @@ describe("attachManifestCapture (real browser against a local fixture server)", 
   it("captures and parses a real HLS media playlist fetched during normal playback", async () => {
     const page = controller.getPage()!;
     const captured: ManifestRecord[] = [];
-    const attachment = attachManifestCapture(page, (record) => captured.push(record));
+    const attachment = attachManifestCapture(page, { onManifest: (record) => captured.push(record) }, {}, "session-1");
 
     await controller.navigateTo(fixture.url);
     await page.evaluate((url) => fetch(url), `${fixture.url}/media.m3u8`);
     await new Promise((resolve) => setTimeout(resolve, 150));
 
     expect(captured).toHaveLength(1);
+    expect(captured[0]!.sessionId).toBe("session-1");
     expect(captured[0]!.analysis.type).toBe("hls");
     if (captured[0]!.analysis.type === "hls") {
       expect(captured[0]!.analysis.segments).toHaveLength(2);
@@ -52,7 +53,7 @@ describe("attachManifestCapture (real browser against a local fixture server)", 
   it("does not capture a non-manifest response (e.g. a plain HTML page) as a manifest", async () => {
     const page = controller.getPage()!;
     const captured: ManifestRecord[] = [];
-    const attachment = attachManifestCapture(page, (record) => captured.push(record));
+    const attachment = attachManifestCapture(page, { onManifest: (record) => captured.push(record) });
 
     await controller.navigateTo(`${fixture.url}/watch`);
     await new Promise((resolve) => setTimeout(resolve, 150));
@@ -61,17 +62,38 @@ describe("attachManifestCapture (real browser against a local fixture server)", 
     attachment.detach();
   }, 30_000);
 
+  it("surfaces a manifest-shaped response that fails to parse via onParseFailure, instead of silently dropping it", async () => {
+    const page = controller.getPage()!;
+    const failures: ManifestParseFailure[] = [];
+    const attachment = attachManifestCapture(page, {
+      onManifest: () => {},
+      onParseFailure: (failure) => failures.push(failure),
+    });
+
+    // /broken-manifest.m3u8 is served with an HLS content-type but a body that doesn't parse as HLS.
+    await controller.navigateTo(fixture.url);
+    await page.evaluate((url) => fetch(url), `${fixture.url}/broken-manifest.m3u8`);
+    await new Promise((resolve) => setTimeout(resolve, 150));
+
+    expect(failures).toHaveLength(1);
+    expect(failures[0]!.url).toContain("broken-manifest.m3u8");
+    expect(failures[0]!.reason).toBeTruthy();
+
+    attachment.detach();
+  }, 30_000);
+
   it("end-to-end: captured manifest + observed segment traffic produce an accurate coverage report, including a genuinely missing segment", async () => {
     const page = controller.getPage()!;
     const store = new EvidenceStore(
       path.join(profileDir, "..", "events.json"),
       path.join(profileDir, "..", "manifests.json"),
+      path.join(profileDir, "..", "manifest-failures.json"),
       { maxEvents: 1000, maxAgeHours: 72 },
     );
     const observer = new NetworkObserver();
     observer.start();
     observer.on("event", (event) => store.recordEvent(event));
-    const manifestAttachment = attachManifestCapture(page, (record) => store.recordManifest(record));
+    const manifestAttachment = attachManifestCapture(page, { onManifest: (record) => store.recordManifest(record) });
     const observerAttachment = observer.attach(page);
 
     await controller.navigateTo(fixture.url);

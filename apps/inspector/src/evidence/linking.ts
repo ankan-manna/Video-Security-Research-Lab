@@ -55,6 +55,7 @@ export function buildSegmentInventory(events: NetworkEvent[], manifests: Manifes
     )
     .map((e) => ({
       eventId: e.id,
+      sessionId: e.sessionId,
       url: e.url,
       classification: e.classification,
       status: e.status,

@@ -12,7 +12,7 @@ repeated here.
 
 Below is the roadmap for the corrected direction, starting fresh at Prompt 1.
 
-## Prompt 1 — Refactor, target configuration, and the observation foundation ✅ (this stage)
+## Prompt 1 — Refactor, target configuration, and the observation foundation ✅
 
 Audited the full existing repository before changing anything (see REFACTOR_PLAN.md §1), then:
 
@@ -61,25 +61,81 @@ Audited the full existing repository before changing anything (see REFACTOR_PLAN
   **real** headless Chromium against a local synthetic fixture server, not mocks, per the explicit
   "use synthetic test fixtures, not mocked browser behavior" requirement.
 
-### Not built in this stage (explicitly out of scope — "Prompt 1 only")
+### Not built in Prompt 1 (explicitly out of scope at the time — see Prompt 2 below for what closed these)
 
-- Any automated security *test execution* against the real target. This stage only observes and
-  reports; it doesn't yet decide pass/fail against a target's authorization behavior the way the
-  old (removed) engine did against its own mock app. Designing that correctly — around real,
-  observed evidence, respecting `SessionMonitor.shouldPauseTests()` — is real design work for a
-  later prompt, not assumed or stubbed in now.
-- Evidence export/reporting (JSON/HTML, download) — the dashboard shows evidence live; nothing
-  serializes a shareable report yet.
+- ~~Evidence export/reporting~~ — closed in Prompt 2 (JSON/CSV export of sanitized traffic).
+- Any automated security *test execution* against the real target — still not built; see Prompt 3.
 - Any UI/flow specific to "G1" or "G2" as named roles — this tool observes whichever account the
   operator is manually signed in as; it has no concept of synthetic accounts anymore.
 
+## Prompt 2 — Live traffic timeline and video segment inspection ✅ (this stage)
+
+Audited Prompt 1 against its own docs first (full test suite re-run, 109/109 passing before any
+change), then extended the existing modules rather than replacing them:
+
+- **Richer resource classification** (`network/classify.ts`): split the single `"manifest"` bucket
+  into `"hls_manifest"`/`"dash_manifest"`, and added `"script"`/`"stylesheet"`/`"image"` — still
+  using only observed content-type/extension/Playwright-resource-type evidence, never an assumed
+  technology. Every classification now carries a `"definite"`/`"tentative"` confidence: `"tentative"`
+  when a URL extension is the only evidence, with no corroborating content-type or resource-type
+  signal — surfaced in the dashboard as an explicit badge, not silently presented as certain.
+- **Captured, redacted headers**: `NetworkEvent` now carries `requestHeaders`/`responseHeaders`
+  (via `@research-lab/security`'s `redactHeaders` — cookie/authorization/token/session-shaped
+  values become `"[REDACTED]"`), surfaced in a new request-details panel (click any timeline row).
+- **Manifest parse failures surfaced, not silently dropped**: `attachManifestCapture` now calls
+  `analyzeManifestText()` with **no format hint** (a real bug found while building this — passing
+  an explicit hint based on metadata classification meant the parser could never actually fail,
+  making "surface parse failures" unreachable). A response that's HLS/DASH-*shaped* by metadata but
+  whose body doesn't actually parse as either is now recorded as a `ManifestParseFailure` and shown
+  in the dashboard, not dropped.
+- **Capture sessions**: every browser launch gets a `sessionId`, stamped on every event/manifest it
+  produces. `EvidenceStore.getCaptureSessions()` groups captured evidence by launch — "grouping into
+  a playback session where feasible," derived from existing data rather than separately tracked.
+- **Configurable capture duration**: `NetworkObserver.start(durationSeconds?)` auto-stops recording
+  after the given duration, resetting the clock (not stacking timers) if called again.
+- **A real resilience gap found and fixed**: `EvidenceStore.load()`'s `readJsonArray()` only
+  tolerated a missing file (`ENOENT`) — a *corrupted* file (malformed JSON, or valid JSON that
+  isn't an array) threw an uncaught `SyntaxError`, which would have crashed the service on startup.
+  Now logs a warning and starts from an empty list for either failure mode. Regression-tested.
+- **Export**: `GET /api/evidence/export?format=json|csv` — sanitized traffic metadata only (the same
+  redaction already applied at capture time), with `Content-Disposition: attachment`. CSV omits the
+  nested header lists (JSON carries them in full); never includes anything beyond what was already
+  redacted, because this module never had access to anything else.
+- **Dashboard**: the Network Observation panel is now a full live traffic timeline — timestamp
+  column, filters (resource type incl. a "manifests & segments only" quick filter, status code,
+  failed-only, URL search, since/until time range), and a click-to-expand request-details row
+  (full URL, redirect chain, failure text, tentative-classification explanation, redacted request/
+  response headers). The Evidence panel gained manifest structure detail (HLS variants/segments/
+  encryption; DASH periods/adaptation-sets/representations), a manifest-parse-failures list, a
+  capture-sessions summary, and a searchable/filterable segment inventory. The browser controller's
+  capture button now reads "start/pause/resume capture" and accepts an optional duration.
+  Everywhere an HTTP 200 is shown, the UI states explicitly that this is not proof of successful
+  decode/playback — only that the browser received a response.
+- **Tests**: 123 passing in `apps/inspector` (up from 102 in Prompt 1), still driving a real
+  headless Chromium against the local fixture server for every browser-dependent case — new
+  coverage for classification confidence, header redaction, sessionId stamping, capture-duration
+  auto-stop, manifest-parse-failure surfacing, malformed-JSON resilience, and JSON/CSV export.
+  `packages/security`, `packages/manifest`, and `apps/api` are unaffected by this stage — see the
+  README's "Running tests" section for the exact, currently-passing monorepo-wide total.
+
+### Not built in Prompt 2 (explicitly out of scope — "Prompt 2 only")
+
+- Any automated security *test execution* against the real target — Prompt 2 is observation,
+  analysis, and evidence export; it still doesn't decide pass/fail against a target's authorization
+  behavior. That's Prompt 3.
+- Media-element-level playback confirmation (e.g. instrumenting `<video>`'s own `playing`/`error`
+  events) — the explicit "don't infer playback from HTTP 200" requirement is satisfied by never
+  claiming decode/playback success from network evidence alone (the UI and docs say so explicitly),
+  not by adding a second, JS-injected signal source. Noted as a real option for a future prompt if
+  finer-grained playback confirmation becomes necessary, not assumed necessary now.
+
 ## Likely future prompts (not started, not designed in detail yet)
 
-- A real-target security test engine built from observed evidence (e.g. "did the browser ever
-  receive a 200 for a members-only segment while `session_renewal_suspected` rather than
-  `session_validity_confirmed`?") rather than controlling a fixture app directly.
-- Evidence/report export (JSON and/or HTML), redacted and clearly scoped, following the same
-  "never claim more than what was actually observed" discipline as everything built so far.
+- **Prompt 3** (per the user's own stated plan): controlled security tests against the configured
+  real target, built from observed evidence and respecting `SessionMonitor.shouldPauseTests()` —
+  e.g. "did the browser ever receive a 200 for a members-only segment while
+  `session_renewal_suspected` rather than `session_validity_confirmed`?" — rather than controlling
+  a fixture app directly, the way the removed mock-platform engine did.
 - Possibly: a second concurrent browser profile to compare two sessions (e.g. owner vs. member)
   side by side, if that turns out to be more useful than sequential manual sign-ins.
 

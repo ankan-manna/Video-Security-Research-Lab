@@ -77,13 +77,30 @@ Open `http://localhost:3000`. The dashboard sections, in order:
    browser.** The Session Monitor shows six distinct authentication-state signals as they're
    observed — see [docs/SESSION_MONITORING.md](docs/SESSION_MONITORING.md) for exactly what each
    means and what is (and isn't) treated as proof of a valid session.
-3. **Network Observation** — click "start observation," then browse/play video in the launched
-   browser normally. Sanitized request/response metadata appears here as it's captured —
-   sensitive query parameters redacted, response bodies never read.
-4. **Evidence** — manifests identified during playback, with a coverage report comparing what the
-   manifest declared against what the browser actually received (received / missing / failed), plus
-   a segment inventory. "Clear evidence" deletes everything this tool has recorded.
-5. **Research Workspace** — the standalone `apps/api` utilities: submit a URL for metadata analysis,
+3. **Browser Controller — capture** — optionally enter a duration (seconds) before clicking "start
+   capture," then browse/play video in the launched browser normally. "pause capture"/"resume
+   capture" toggle recording without losing what's already captured; a duration auto-stops the
+   capture without an explicit click.
+4. **Live Traffic Timeline** — every captured request appears here as it happens: timestamp,
+   method, redacted URL, a classification badge (document/script/stylesheet/image/fetch-XHR/
+   HLS manifest/DASH manifest/segment/init segment/other — `tentative` when only the URL extension
+   supports it), status, content-type, size, timing. Filter by resource type (including a
+   "manifests & segments only" quick filter), status code, failed-only, URL search text, or a time
+   range. Click any row to expand redacted request/response headers, the redirect chain, and
+   failure text. "Export JSON"/"Export CSV" download the currently-captured, already-redacted
+   traffic metadata — never raw cookies, tokens, or session identifiers. The panel states
+   explicitly, next to every status code, that an HTTP 200 is not proof a segment was successfully
+   decoded or played — only that the browser received a response.
+5. **Manifest Analysis & Segment Inventory** — manifests identified during playback, expandable into
+   full HLS (variants, bandwidth, media segments, sequence numbers, encryption *detection* without
+   ever retrieving a key) or DASH (periods, adaptation sets, representations, codecs, bandwidth,
+   segment templates) structure. A manifest that's HLS/DASH-*shaped* by content-type but doesn't
+   actually parse is listed under "manifest parse failures," not silently dropped. A capture-sessions
+   summary groups evidence by browser launch. The segment inventory (filterable by search text and
+   failed-only) links each observed segment request to the manifest that declared it, with a
+   coverage report comparing what the manifest declared against what the browser actually received
+   (received / missing / failed). "Clear evidence" deletes everything this tool has recorded.
+6. **Research Workspace** — the standalone `apps/api` utilities: submit a URL for metadata analysis,
    import a HAR capture exported from DevTools, or paste/fetch a manifest directly. Independent of
    the inspector above; useful as a secondary, complementary analysis path.
 
@@ -97,7 +114,8 @@ Runs every workspace's Vitest suite. **A large share of `apps/inspector`'s tests
 headless Chromium against a local synthetic HTTP fixture server** (`apps/inspector/test/helpers/fixtureServer.ts`)
 — never a real target, never mocked browser behavior, per the project's explicit "use synthetic
 fixtures, verify with a real browser" requirement. `npx playwright install chromium` must have been
-run first (see Setup); CI installs it automatically.
+run first (see Setup); CI installs it automatically. See [docs/ROADMAP.md](docs/ROADMAP.md) for the
+per-workspace test counts as of the current stage.
 
 ## Backend API reference
 
@@ -111,13 +129,16 @@ run first (see Setup); CI installs it automatically.
 | `POST` | `/api/browser/close` | Closes it cleanly. |
 | `GET` | `/api/browser/status` | Connection state + current URL. |
 | `POST` | `/api/browser/navigate` | Loads a URL in the operator's own browser tab (any http/https URL — see docs/SECURITY_MODEL.md for why this isn't origin-restricted). |
-| `POST` | `/api/observation/start` \| `/stop` | Starts/stops recording captured network events. |
+| `POST` | `/api/observation/start` \| `/stop` | Starts/stops recording captured network events. `start` accepts an optional JSON body `{ "durationSeconds": number }` to auto-stop after that many seconds; omitted means capture until explicitly stopped. |
 | `GET` | `/api/observation/status` | Whether observation is currently recording. |
 | `GET` | `/api/session` | The session monitor's current state + history. |
 | `GET` | `/api/evidence/events` | Captured, sanitized network events. |
 | `GET` | `/api/evidence/manifests` | Identified and parsed manifests. |
+| `GET` | `/api/evidence/manifest-failures` | Manifest-shaped responses (by content-type/extension) that failed to parse as valid HLS/DASH. |
 | `GET` | `/api/evidence/manifests/:id/coverage` | Received/missing/failed segment report for one manifest. |
 | `GET` | `/api/evidence/segments` | Segment inventory, each linked to its manifest where possible. |
+| `GET` | `/api/evidence/sessions` | Captured evidence grouped by browser-launch (capture session). |
+| `GET` | `/api/evidence/export?format=json\|csv` | Downloads already-redacted traffic metadata as an attachment. Never includes raw cookies, Authorization headers, or tokens. |
 | `POST` | `/api/evidence/clear` | Deletes all captured evidence. |
 
 ### `apps/api` (unchanged analysis utilities)
@@ -138,13 +159,15 @@ Full request/response shapes and configuration: [docs/ARCHITECTURE.md](docs/ARCH
 ## Known limitations
 
 See [docs/SECURITY_MODEL.md](docs/SECURITY_MODEL.md)'s "Threats explicitly out of scope" and
-[docs/ROADMAP.md](docs/ROADMAP.md)'s "Not built in this stage" for the full, honest list —
-summarized: no automated security-test execution yet (observation/evidence only), no evidence
-export, no rate limiting or auth on the local services themselves (acceptable for a local,
-single-operator tool), and the login-detection heuristic in the session monitor is exactly that — a
-heuristic, documented as such.
+[docs/ROADMAP.md](docs/ROADMAP.md)'s "Not built in Prompt 2" for the full, honest list —
+summarized: no automated security-test execution yet (observation, analysis, and export only), no
+rate limiting or auth on the local services themselves (acceptable for a local, single-operator
+tool), no media-element-level playback confirmation (an HTTP 200 is explicitly never presented as
+proof of decode/playback), and the login-detection heuristic in the session monitor is exactly
+that — a heuristic, documented as such.
 
 ## Next step
 
-See [docs/ROADMAP.md](docs/ROADMAP.md) for what's likely to come next — a real-target security test
-engine built from observed evidence, and evidence/report export.
+See [docs/ROADMAP.md](docs/ROADMAP.md) for what's likely to come next — Prompt 3: controlled
+security tests against the real target, built from the evidence this stage now captures and
+exports.

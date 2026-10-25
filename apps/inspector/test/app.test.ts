@@ -187,4 +187,68 @@ describe("browser + observation + session + evidence routes (real headless brows
     expect(response.statusCode).toBe(400);
     await built.app.inject({ method: "POST", url: "/api/browser/close" });
   }, 30_000);
+
+  it(
+    "captures a session, surfaces it via GET /api/evidence/sessions, and exports sanitized " +
+      "traffic as both JSON and CSV with correct download headers",
+    async () => {
+      built = await buildApp(testEnv());
+      await built.app.inject({ method: "POST", url: "/api/browser/launch" });
+      await built.app.inject({ method: "POST", url: "/api/observation/start" });
+      await built.app.inject({
+        method: "POST",
+        url: "/api/browser/navigate",
+        payload: { url: `${fixture.url}/auto-play` },
+      });
+      await new Promise((resolve) => setTimeout(resolve, 400));
+
+      const sessionsResponse = await built.app.inject({ method: "GET", url: "/api/evidence/sessions" });
+      expect(sessionsResponse.statusCode).toBe(200);
+      const { sessions } = sessionsResponse.json();
+      expect(sessions.length).toBeGreaterThanOrEqual(1);
+      expect(sessions[0].eventCount).toBeGreaterThan(0);
+
+      const jsonExport = await built.app.inject({ method: "GET", url: "/api/evidence/export?format=json" });
+      expect(jsonExport.statusCode).toBe(200);
+      expect(jsonExport.headers["content-type"]).toContain("application/json");
+      expect(jsonExport.headers["content-disposition"]).toContain("attachment");
+      expect(jsonExport.json().events.length).toBeGreaterThan(0);
+
+      const csvExport = await built.app.inject({ method: "GET", url: "/api/evidence/export?format=csv" });
+      expect(csvExport.statusCode).toBe(200);
+      expect(csvExport.headers["content-type"]).toContain("text/csv");
+      expect(csvExport.headers["content-disposition"]).toContain(".csv");
+      expect(csvExport.body.split("\n")[0]).toContain("id,sessionId");
+
+      await built.app.inject({ method: "POST", url: "/api/browser/close" });
+    },
+    30_000,
+  );
+
+  it("GET /api/evidence/manifest-failures returns an empty list before anything has been observed", async () => {
+    built = await buildApp(testEnv());
+    const response = await built.app.inject({ method: "GET", url: "/api/evidence/manifest-failures" });
+    expect(response.statusCode).toBe(200);
+    expect(response.json().failures).toEqual([]);
+  });
+
+  it("POST /api/observation/start accepts an optional durationSeconds and rejects an invalid one", async () => {
+    built = await buildApp(testEnv());
+    const valid = await built.app.inject({
+      method: "POST",
+      url: "/api/observation/start",
+      payload: { durationSeconds: 5 },
+    });
+    expect(valid.statusCode).toBe(200);
+    expect(valid.json()).toEqual({ recording: true, durationSeconds: 5 });
+
+    const invalid = await built.app.inject({
+      method: "POST",
+      url: "/api/observation/start",
+      payload: { durationSeconds: -1 },
+    });
+    expect(invalid.statusCode).toBe(400);
+
+    await built.app.inject({ method: "POST", url: "/api/observation/stop" });
+  });
 });

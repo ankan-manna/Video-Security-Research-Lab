@@ -89,6 +89,14 @@ export function startFixtureServer(): Promise<FixtureServerHandle> {
       return;
     }
 
+    if (url.pathname === "/broken-manifest.m3u8") {
+      // HLS-shaped by content-type and extension, but the body doesn't actually start with
+      // #EXTM3U — exercises the "manifest-shaped but didn't actually parse" path.
+      res.writeHead(200, { "content-type": "application/vnd.apple.mpegurl" });
+      res.end("this is not a real playlist at all");
+      return;
+    }
+
     if (url.pathname === "/manifest.mpd") {
       res.writeHead(200, { "content-type": "application/dash+xml" });
       res.end("<MPD></MPD>");

@@ -76,11 +76,17 @@ list — rejected with a specific reason if it doesn't belong. See
 ```
 POST /api/browser/launch
   → BrowserController.launch() — chromium.launchPersistentContext(profileDir)
+  → sessionId = randomUUID()                                        — one id per launch, stamped on everything it produces
   → SessionMonitor.recordConnected()
-  → attachSessionMonitor(page, context, monitor, pollIntervalMs)  — real nav/response events + cookie-name polling
-  → NetworkObserver.attach(page)                                    — real request/response/requestfailed events
-  → attachManifestCapture(page, onManifest)                         — reads manifest-classified response bodies only
+  → attachSessionMonitor(page, context, monitor, pollIntervalMs)   — real nav/response events + cookie-name polling
+  → NetworkObserver.attach(page, sessionId)                          — real request/response/requestfailed events
+  → attachManifestCapture(page, {onManifest, onParseFailure}, {}, sessionId)
+                                                                      — reads manifest-classified response bodies only
   → periodic EvidenceStore.persist() every 5s while connected
+
+POST /api/observation/start { durationSeconds? }
+  → NetworkObserver.start(durationSeconds)   — recording on; an optional timer calls stop() once,
+                                                 resetting (not stacking) on a repeated start() call
 ```
 
 `InspectorService` (`src/service.ts`) owns this wiring so routes stay thin. On disconnect (explicit
@@ -92,13 +98,19 @@ cleared, and one final `persist()` runs.
 
 ```
 real browser request/response (human-driven)
-  → NetworkObserver: redact URL, classify resource, compute size from Content-Length only
+  → NetworkObserver: redact URL, classify resource (classify.ts → {classification, confidence}),
+                      redact request/response headers (redactHeaders, capped at 50/event),
+                      compute size from Content-Length only
   → EvidenceStore.recordEvent() (in-memory; periodic persist())
 
-response classified "manifest" (separately, by attachManifestCapture)
-  → response.text() → @research-lab/manifest's analyzeManifestText()
-  → redact declared URIs, resolve segment URIs to absolute+redacted URLs
-  → EvidenceStore.recordManifest()
+response classified "hls_manifest" or "dash_manifest" (separately, by attachManifestCapture)
+  → response.text() → @research-lab/manifest's analyzeManifestText(text)  — no format hint passed;
+                       parsing is driven purely by the body's own content (#EXTM3U / <MPD>), so a
+                       manifest-shaped-but-unparseable response is a reachable outcome, not one the
+                       caller forced to always succeed
+  → ok   → redact declared URIs, resolve segment URIs to absolute+redacted URLs
+           → EvidenceStore.recordManifest()
+  → !ok  → EvidenceStore.recordManifestParseFailure({url, observedAt, reason})
 
 GET /api/evidence/segments        → buildSegmentInventory(events, manifests) — links each
                                       segment event to the manifest whose resolved URLs include it
@@ -106,6 +118,14 @@ GET /api/evidence/manifests/:id/coverage
                                    → buildManifestCoverageReport() — compares a manifest's declared
                                       segments against what was actually observed: received /
                                       missing (never requested) / failed (requested, didn't complete)
+GET /api/evidence/manifest-failures → manifest-shaped responses that didn't parse, surfaced instead
+                                        of silently dropped
+GET /api/evidence/sessions        → EvidenceStore.getCaptureSessions() — groups events/manifests by
+                                      the sessionId stamped once per browser launch
+GET /api/evidence/export          → eventsToJson()/eventsToCsv() (exportFormat.ts) over the
+                                      already-redacted in-memory events — never re-derives from a
+                                      live source, never includes anything beyond what capture-time
+                                      redaction already applied
 ```
 
 ## Module boundaries and reuse
@@ -119,14 +139,20 @@ GET /api/evidence/manifests/:id/coverage
   fixtures copied alongside (not re-derived), same behavior.
 - `apps/inspector` owns everything "real browser, real target": `targetConfig/` (config + validation
   + storage), `browser/` (controller, session monitor, their Playwright-attachment wiring),
-  `network/` (observer, resource classification), `evidence/` (manifest capture, segment/manifest
-  linking, coverage reporting, persistence). `service.ts` is the one place these are wired together;
-  `routes/*.ts` are thin Fastify handlers over `InspectorService`.
+  `network/` (observer, resource classification + confidence), `evidence/` (manifest capture,
+  manifest-parse-failure surfacing, segment/manifest linking, coverage reporting, capture-session
+  grouping, JSON/CSV export, persistence). `service.ts` is the one place these are wired together
+  (including generating and threading the per-launch `sessionId`); `routes/*.ts` are thin Fastify
+  handlers over `InspectorService`.
 - `apps/web` owns presentation only — it talks to `apps/api` and `apps/inspector` over HTTP exactly
   as any external client would, holding no business logic of its own. `TargetConfigPanel`,
-  `BrowserControllerPanel`, `SessionMonitorPanel`, `NetworkObservationPanel`, and
-  `EvidenceInventoryPanel` are the new panels this stage added; `UrlForm`/`AnalysisHistory`/
-  `HarUpload`/`ManifestInspector` are unchanged clients of `apps/api`.
+  `BrowserControllerPanel` (Prompt 1; extended in Prompt 2 with a capture-duration input and
+  start/pause/resume labeling), `SessionMonitorPanel`, `NetworkObservationPanel` (rewritten in
+  Prompt 2 into the full live traffic timeline with filters, expandable request details, and
+  export links), and `EvidenceInventoryPanel` (rewritten in Prompt 2 with HLS/DASH structure detail,
+  manifest-parse-failures, capture-sessions, and a filterable segment inventory) are the panels this
+  stage's two prompts added; `UrlForm`/`AnalysisHistory`/`HarUpload`/`ManifestInspector` are
+  unchanged clients of `apps/api`.
 
 ## Two deliberate non-restrictions, both documented at their source
 
@@ -144,17 +170,20 @@ GET /api/evidence/manifests/:id/coverage
 
 ## What's deliberately not built yet
 
-This stage ("Prompt 1" of the corrected direction) is observation and evidence collection only. Not
-yet built, and not assumed:
+Prompts 1 and 2 together are observation, analysis, and evidence export only. Not yet built, and
+not assumed:
 
 - Any automated security *test execution* against the real target (the old project's
   "Security Testing Engine" tested its own mock app — that pattern doesn't carry over directly; a
   future stage would need to design real-target tests around observed evidence, respecting
-  `SessionMonitor.shouldPauseTests()`).
-- Report generation/export of evidence (the dashboard shows evidence live; nothing serializes it
-  into a shareable report yet).
+  `SessionMonitor.shouldPauseTests()`). This is Prompt 3 — see [ROADMAP.md](ROADMAP.md).
+- Media-element-level playback confirmation (instrumenting `<video>`'s own `playing`/`error`
+  events as a second signal alongside network evidence) — not needed to satisfy "never infer
+  playback from HTTP 200," since that's already enforced by never claiming decode/playback success
+  from network evidence alone; noted as a real option for a future stage, not assumed necessary.
 - Multi-session or multi-account comparison (e.g. automatically diffing a G1 vs. G2 session) —
-  today the operator manually drives one browser session at a time.
+  today the operator manually drives one browser session at a time; Prompt 2's `sessionId`/capture-
+  sessions grouping tracks *sequential* launches, not a side-by-side diff.
 - Real-time push (SSE/WebSocket) for network events — the dashboard polls, matching the rest of
   this project's established pattern; acceptable at this scale, revisit only if it becomes a real
   bottleneck.

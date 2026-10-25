@@ -47,7 +47,8 @@ describe("NetworkObserver (real browser against a local fixture server)", () => 
     expect(manifestEvent!.method).toBe("GET");
     expect(manifestEvent!.status).toBe(200);
     expect(manifestEvent!.contentType).toBe("application/vnd.apple.mpegurl");
-    expect(manifestEvent!.classification).toBe("manifest");
+    expect(manifestEvent!.classification).toBe("hls_manifest");
+    expect(manifestEvent!.classificationConfidence).toBe("definite");
     expect(manifestEvent!.requestStartedAt).toBeTruthy();
     expect(manifestEvent!.responseReceivedAt).toBeTruthy();
     expect(manifestEvent!.durationMs).toBeGreaterThanOrEqual(0);
@@ -177,4 +178,74 @@ describe("NetworkObserver (real browser against a local fixture server)", () => 
     expect(emitted.length).toBeGreaterThan(0);
     attachment.detach();
   }, 30_000);
+
+  it("captures and redacts real request/response headers, never leaking a sensitive header value", async () => {
+    const observer = new NetworkObserver();
+    observer.start();
+    const page = controller.getPage()!;
+    const attachment = observer.attach(page);
+
+    await controller.navigateTo(fixture.url);
+    await page.evaluate(
+      (url) => fetch(url, { headers: { Authorization: "Bearer super-secret-token-value" } }),
+      `${fixture.url}/api/protected`,
+    );
+    await new Promise((resolve) => setTimeout(resolve, 150));
+
+    const event = observer.getEvents().find((e) => e.url.includes("/api/protected"));
+    expect(event).toBeDefined();
+    const authHeader = event!.requestHeaders.find((h) => h.name.toLowerCase() === "authorization");
+    expect(authHeader).toBeDefined();
+    expect(authHeader!.value).toBe("[REDACTED]");
+    expect(JSON.stringify(event)).not.toContain("super-secret-token-value");
+    expect(event!.responseHeaders.length).toBeGreaterThan(0);
+
+    attachment.detach();
+  }, 30_000);
+
+  it("stamps every captured event with the sessionId passed to attach()", async () => {
+    const observer = new NetworkObserver();
+    observer.start();
+    const attachment = observer.attach(controller.getPage()!, "capture-session-xyz");
+
+    await controller.navigateTo(fixture.url);
+    await new Promise((resolve) => setTimeout(resolve, 100));
+
+    const events = observer.getEvents();
+    expect(events.length).toBeGreaterThan(0);
+    expect(events.every((e) => e.sessionId === "capture-session-xyz")).toBe(true);
+
+    attachment.detach();
+  }, 30_000);
+
+  it("auto-stops recording after the configured capture duration", async () => {
+    const observer = new NetworkObserver();
+    observer.start(1); // 1 second
+    const page = controller.getPage()!;
+    const attachment = observer.attach(page);
+
+    await controller.navigateTo(fixture.url);
+    expect(observer.isRecording()).toBe(true);
+
+    await new Promise((resolve) => setTimeout(resolve, 1300));
+    expect(observer.isRecording()).toBe(false);
+
+    const countAtStop = observer.getEvents().length;
+    await page.evaluate((url) => fetch(url), `${fixture.url}/watch`);
+    await new Promise((resolve) => setTimeout(resolve, 150));
+    expect(observer.getEvents()).toHaveLength(countAtStop);
+
+    attachment.detach();
+  }, 30_000);
+
+  it("calling start() again before the duration elapses resets the auto-stop clock rather than stacking timers", async () => {
+    const observer = new NetworkObserver();
+    observer.start(1);
+    await new Promise((resolve) => setTimeout(resolve, 700));
+    observer.start(1); // reset the clock with 700ms already elapsed on the first timer
+    await new Promise((resolve) => setTimeout(resolve, 700));
+    // If the first timer had fired at the ~1000ms mark instead of being cleared, recording would
+    // already be false here.
+    expect(observer.isRecording()).toBe(true);
+  });
 });

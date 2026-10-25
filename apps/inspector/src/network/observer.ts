@@ -1,7 +1,7 @@
 import { EventEmitter } from "node:events";
 import { randomUUID } from "node:crypto";
 import type { Page, Request, Response } from "playwright";
-import { redactUrl } from "@research-lab/security";
+import { redactUrl, redactHeaders, type NameValue } from "@research-lab/security";
 import { classifyResource } from "./classify.js";
 import type { NetworkEvent } from "./types.js";
 
@@ -13,6 +13,14 @@ export interface NetworkObserverOptions {
 
 export interface NetworkObserverAttachment {
   detach: () => void;
+}
+
+const MAX_HEADERS_CAPTURED = 50;
+
+function toNameValueList(headers: Record<string, string>): NameValue[] {
+  return Object.entries(headers)
+    .slice(0, MAX_HEADERS_CAPTURED)
+    .map(([name, value]) => ({ name, value }));
 }
 
 /**
@@ -30,12 +38,18 @@ export interface NetworkObserverAttachment {
  * 2. It never issues a request itself. Every event recorded here is a
  *    request the browser already made on its own (because a human
  *    navigated or clicked play) — this module only listens.
+ *
+ * Request/response headers are captured and redacted before storage
+ * (`@research-lab/security`'s `redactHeaders` — cookie/authorization/
+ * token/session-shaped header values become "[REDACTED]", names are kept
+ * so the evidence still shows *that* a header was present).
  */
 export class NetworkObserver extends EventEmitter {
   private events: NetworkEvent[] = [];
   private recording = false;
   private readonly maxBufferedEvents: number;
   private readonly captureResourceTypes: Set<string>;
+  private autoStopTimer: ReturnType<typeof setTimeout> | null = null;
 
   constructor(options: NetworkObserverOptions = {}) {
     super();
@@ -43,12 +57,30 @@ export class NetworkObserver extends EventEmitter {
     this.captureResourceTypes = new Set(options.captureResourceTypes ?? []);
   }
 
-  start(): void {
+  /**
+   * Starts recording. `durationSeconds`, when given, auto-stops recording
+   * after that many seconds — a configurable capture-duration limit rather
+   * than requiring the operator to remember to stop it manually. Any
+   * previously scheduled auto-stop is cleared first, so calling `start()`
+   * again resets the clock rather than stacking timers.
+   */
+  start(durationSeconds?: number): void {
     this.recording = true;
+    if (this.autoStopTimer) {
+      clearTimeout(this.autoStopTimer);
+      this.autoStopTimer = null;
+    }
+    if (durationSeconds && durationSeconds > 0) {
+      this.autoStopTimer = setTimeout(() => this.stop(), durationSeconds * 1000);
+    }
   }
 
   stop(): void {
     this.recording = false;
+    if (this.autoStopTimer) {
+      clearTimeout(this.autoStopTimer);
+      this.autoStopTimer = null;
+    }
   }
 
   isRecording(): boolean {
@@ -63,7 +95,7 @@ export class NetworkObserver extends EventEmitter {
     this.events = [];
   }
 
-  attach(page: Page): NetworkObserverAttachment {
+  attach(page: Page, sessionId: string | null = null): NetworkObserverAttachment {
     const pending = new Map<Request, NetworkEvent>();
 
     const onRequest = (request: Request) => {
@@ -71,6 +103,7 @@ export class NetworkObserver extends EventEmitter {
       const redirectedFrom = request.redirectedFrom();
       const event: NetworkEvent = {
         id: randomUUID(),
+        sessionId,
         method: request.method(),
         url: redactUrl(request.url()).url,
         resourceType: request.resourceType(),
@@ -85,6 +118,9 @@ export class NetworkObserver extends EventEmitter {
         failureText: null,
         cancelled: false,
         classification: "other",
+        classificationConfidence: "definite",
+        requestHeaders: redactHeaders(toNameValueList(request.headers())).headers,
+        responseHeaders: [],
       };
       pending.set(request, event);
     };
@@ -103,7 +139,10 @@ export class NetworkObserver extends EventEmitter {
       event.responseSizeBytes = contentLength ? Number.parseInt(contentLength, 10) || null : null;
       event.responseReceivedAt = new Date().toISOString();
       event.durationMs = new Date(event.responseReceivedAt).getTime() - new Date(event.requestStartedAt).getTime();
-      event.classification = classifyResource(event.url, contentType, event.resourceType);
+      event.responseHeaders = redactHeaders(toNameValueList(response.headers())).headers;
+      const classified = classifyResource(event.url, contentType, event.resourceType);
+      event.classification = classified.classification;
+      event.classificationConfidence = classified.confidence;
 
       this.pushEvent(event);
     };
@@ -119,7 +158,9 @@ export class NetworkObserver extends EventEmitter {
       event.cancelled = failure?.errorText === "net::ERR_ABORTED";
       event.responseReceivedAt = new Date().toISOString();
       event.durationMs = new Date(event.responseReceivedAt).getTime() - new Date(event.requestStartedAt).getTime();
-      event.classification = classifyResource(event.url, null, event.resourceType);
+      const classified = classifyResource(event.url, null, event.resourceType);
+      event.classification = classified.classification;
+      event.classificationConfidence = classified.confidence;
 
       this.pushEvent(event);
     };

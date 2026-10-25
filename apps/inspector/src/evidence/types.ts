@@ -2,6 +2,7 @@ import type { ManifestAnalysis } from "@research-lab/manifest";
 
 export interface ManifestRecord {
   id: string;
+  sessionId: string | null;
   /** Redacted — where the manifest itself was fetched from. */
   url: string;
   observedAt: string;
@@ -11,8 +12,26 @@ export interface ManifestRecord {
   resolvedSegmentUrls: string[];
 }
 
+/**
+ * A response that looked like an HLS/DASH manifest by metadata (content-type
+ * or extension) but whose body did not actually parse as one — e.g. a
+ * dynamic/incomplete playlist, an encrypted or otherwise unsupported
+ * variant, or a response that merely shares a file extension with a real
+ * manifest. Recorded explicitly rather than silently dropped, so the
+ * operator can see *that* something manifest-shaped was observed and
+ * *why* it couldn't be analyzed.
+ */
+export interface ManifestParseFailure {
+  id: string;
+  sessionId: string | null;
+  url: string;
+  observedAt: string;
+  reason: string;
+}
+
 export interface SegmentInventoryItem {
   eventId: string;
+  sessionId: string | null;
   url: string;
   classification: "segment" | "init_segment";
   status: number | null;

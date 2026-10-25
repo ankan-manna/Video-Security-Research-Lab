@@ -3,6 +3,15 @@
 How `apps/inspector`'s `SessionMonitor` (`src/browser/sessionMonitor.ts`) classifies the
 operator's browser session, and exactly what it does and does not treat as proof.
 
+> **Prompt 2 note**: this module's logic is unchanged from Prompt 1 — Prompt 2's "strengthen
+> session-state monitoring" requirement was re-audited against this file and the existing design
+> already satisfied it in full: connected/disconnected display, a valid/uncertain/expired-shaped
+> reading of the six states, login-redirect and authentication-response detection, suspected-
+> renewal and explicit-reauthentication states, and a visible last-transition timestamp are all
+> already implemented and tested (see the state table below and `SessionMonitorPanel.tsx`'s state
+> history table). Nothing here needed to change; this is stated explicitly rather than silently
+> re-describing the same design as if it were new work.
+
 ## The six states
 
 | State | What it means | How it's reached |

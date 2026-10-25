@@ -1,4 +1,5 @@
 import path from "node:path";
+import { randomUUID } from "node:crypto";
 import { BrowserController } from "./browser/controller.js";
 import { SessionMonitor } from "./browser/sessionMonitor.js";
 import { attachSessionMonitor, type SessionMonitorAttachment } from "./browser/attachSessionMonitor.js";
@@ -28,6 +29,7 @@ export class InspectorService {
   private manifestAttachment: ManifestCaptureAttachment | null = null;
   private networkDetach: (() => void) | null = null;
   private persistTimer: ReturnType<typeof setInterval> | null = null;
+  private currentCaptureSessionId: string | null = null;
 
   constructor(private readonly env: Env) {
     this.targetConfigStore = new TargetConfigStore(path.join(env.INSPECTOR_DATA_DIR, "target-config.json"));
@@ -40,7 +42,9 @@ export class InspectorService {
     this.evidenceStore = new EvidenceStore(
       path.join(env.INSPECTOR_DATA_DIR, "network-events.json"),
       path.join(env.INSPECTOR_DATA_DIR, "manifests.json"),
+      path.join(env.INSPECTOR_DATA_DIR, "manifest-parse-failures.json"),
       { maxEvents: env.EVIDENCE_RETENTION_MAX_EVENTS, maxAgeHours: env.EVIDENCE_RETENTION_MAX_AGE_HOURS },
+      (message) => console.warn(`[inspector] ${message}`),
     );
 
     this.networkObserver.on("event", (event) => this.evidenceStore.recordEvent(event));
@@ -58,6 +62,7 @@ export class InspectorService {
     const page = this.browser.getPage();
     if (!page) return status;
 
+    this.currentCaptureSessionId = randomUUID();
     this.sessionMonitor.recordConnected();
     this.sessionAttachment = attachSessionMonitor(
       page,
@@ -65,8 +70,16 @@ export class InspectorService {
       this.sessionMonitor,
       this.env.SESSION_MONITOR_POLL_INTERVAL_MS,
     );
-    this.networkDetach = this.networkObserver.attach(page).detach;
-    this.manifestAttachment = attachManifestCapture(page, (record) => this.evidenceStore.recordManifest(record));
+    this.networkDetach = this.networkObserver.attach(page, this.currentCaptureSessionId).detach;
+    this.manifestAttachment = attachManifestCapture(
+      page,
+      {
+        onManifest: (record) => this.evidenceStore.recordManifest(record),
+        onParseFailure: (failure) => this.evidenceStore.recordManifestParseFailure(failure),
+      },
+      {},
+      this.currentCaptureSessionId,
+    );
 
     this.persistTimer = setInterval(() => {
       this.evidenceStore.persist().catch(() => {

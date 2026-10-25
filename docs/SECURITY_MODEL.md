@@ -78,7 +78,8 @@ confirmation) versus a weak signal (a cookie-name change — name only, never a 
 
 `NetworkObserver` captures sanitized request/response metadata — method, redacted URL, resource
 type, status, content-type, size (from `Content-Length` only), timing, redirect chain, failure/
-cancellation info — from real Playwright page events. Two structural guarantees, both load-bearing:
+cancellation info, and (added in Prompt 2) redacted request/response headers — from real Playwright
+page events. Two structural guarantees, both load-bearing:
 
 - **Never reads a response body.** `responseSizeBytes` comes only from the `Content-Length`
   response header; if absent, it's reported `null`, never computed by reading the body. Pulling
@@ -92,7 +93,19 @@ cancellation info — from real Playwright page events. Two structural guarantee
 
 Classifies using only observed metadata — declared content-type, the URL's own file extension, and
 Playwright's own resource-type label — never an assumed streaming technology or an invented
-endpoint-name pattern. An unrecognized resource is reported `other`, never guessed at.
+endpoint-name pattern. An unrecognized resource is reported `other`, never guessed at. Every
+classification also carries a confidence: `"definite"` when a content-type or Playwright resource-
+type corroborates it, `"tentative"` when only the URL's file extension supports it — surfaced to the
+operator as an explicit badge rather than presented as equally certain in all cases.
+
+### Header redaction (`src/network/observer.ts`, `packages/security`'s `redactHeaders`)
+
+Both request and response headers are captured, then passed through `redactHeaders()` before they
+ever reach `EvidenceStore` — cookie, `Set-Cookie`, `Authorization`, bearer-token, and session-
+identifier-shaped header values become `"[REDACTED]"` at capture time, not at display or export
+time, so there is no code path (dashboard, persisted JSON, or export) that can see the original
+value. Capped at 50 headers per event (`MAX_HEADERS_CAPTURED`) so a pathological response can't
+grow an event's stored size unbounded.
 
 ### A real redaction gap this caught
 
@@ -144,8 +157,27 @@ shown as "what the manifest said" (that's the faithfully-redacted-but-otherwise-
   `recordEvent()` call, not just at read time.
 
 - **Explicit deletion.** `POST /api/evidence/clear` (the dashboard's "clear evidence" button) wipes
-  in-memory state and deletes both JSON files. There is no "soft delete" — a cleared evidence store
-  has nothing to restore from.
+  in-memory state and deletes all three JSON files (events, manifests, manifest-parse-failures).
+  There is no "soft delete" — a cleared evidence store has nothing to restore from.
+
+- **A real resilience gap found and fixed in Prompt 2.** `EvidenceStore.load()`'s `readJsonArray()`
+  originally only tolerated a *missing* file (`ENOENT`) — a file that existed but was corrupted
+  (malformed JSON, or valid JSON that parsed to something other than an array) threw an uncaught
+  `SyntaxError` on startup, which would have crashed the service rather than degrading gracefully.
+  Fixed to catch both failure modes, log a warning via the store's `onWarning` callback, and start
+  from an empty list either way — regression-tested in `apps/inspector/test/evidence/store.test.ts`
+  with both a hand-corrupted JSON file and a well-formed-but-non-array JSON file.
+
+## Evidence export (`apps/inspector/src/evidence/exportFormat.ts`)
+
+`GET /api/evidence/export?format=json|csv` builds its output exclusively from the same in-memory
+`NetworkEvent[]` that `EvidenceStore` already holds — events whose headers were redacted at capture
+time (see "Header redaction" above) and whose URLs were redacted by `NetworkObserver` before the
+event was ever recorded. The export module itself performs no redaction of its own and has no
+access to anything unredacted to export; it reads already-sanitized data and reformats it, so
+there is no second place a redaction rule would need to be kept in sync. CSV output omits the
+nested request/response header lists (full header detail is JSON-only); both formats set
+`Content-Disposition: attachment` so a browser downloads rather than renders the response.
 
 ## Input validation
 
@@ -161,8 +193,13 @@ protocol (e.g. `javascript:`) explicitly, tested directly.
 - **No authentication on the dashboard or inspector API itself.** Anyone who can reach
   `localhost:3000`/`:4002` can use this tool — acceptable for a local research tool, would need
   revisiting before any shared/networked deployment.
-- **No automated security test execution against the real target yet** — this stage is observation
-  and evidence collection only. See `docs/ARCHITECTURE.md`'s "What's deliberately not built yet."
+- **No automated security test execution against the real target yet** — Prompts 1 and 2 together
+  are observation, analysis, and evidence export only; that's Prompt 3. See
+  `docs/ARCHITECTURE.md`'s "What's deliberately not built yet."
+- **No media-element-level playback confirmation.** An HTTP 200 is reported as exactly that — a
+  response was received — never as proof the segment was decoded or played. This is enforced by
+  never claiming the stronger fact anywhere in code, UI copy, or export output, not by instrumenting
+  the `<video>` element itself as a second signal source.
 - **The login-shaped-URL heuristic (`/login`, `/signin`, etc.) is exactly that — a heuristic.** A
   target using an unconventional login path won't be detected by it. It only ever contributes to
   the *cautious* states (`authentication_may_have_expired`, `session_renewal_suspected`), never to

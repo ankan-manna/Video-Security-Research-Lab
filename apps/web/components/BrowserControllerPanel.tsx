@@ -13,8 +13,10 @@ interface BrowserStatus {
 export function BrowserControllerPanel({ onChanged }: { onChanged?: () => void }) {
   const [status, setStatus] = useState<BrowserStatus>({ connected: false });
   const [recording, setRecording] = useState(false);
+  const [everRecorded, setEverRecorded] = useState(false);
   const [busy, setBusy] = useState(false);
   const [navigateUrl, setNavigateUrl] = useState("");
+  const [durationSeconds, setDurationSeconds] = useState("");
   const [error, setError] = useState<string | null>(null);
 
   const refresh = useCallback(async () => {
@@ -24,7 +26,9 @@ export function BrowserControllerPanel({ onChanged }: { onChanged?: () => void }
         fetch(`${INSPECTOR_BASE_URL}/api/observation/status`, { cache: "no-store" }),
       ]);
       setStatus(await statusRes.json());
-      setRecording((await obsRes.json()).recording);
+      const obsBody = await obsRes.json();
+      setRecording(obsBody.recording);
+      if (obsBody.recording) setEverRecorded(true);
       setError(null);
     } catch {
       setError("Could not reach the inspector service.");
@@ -87,10 +91,21 @@ export function BrowserControllerPanel({ onChanged }: { onChanged?: () => void }
   }
 
   async function toggleObservation() {
-    const endpoint = recording ? "stop" : "start";
-    const response = await fetch(`${INSPECTOR_BASE_URL}/api/observation/${endpoint}`, { method: "POST" });
+    if (recording) {
+      const response = await fetch(`${INSPECTOR_BASE_URL}/api/observation/stop`, { method: "POST" });
+      const body = await response.json();
+      setRecording(body.recording);
+      return;
+    }
+    const parsedDuration = durationSeconds.trim() ? Number.parseInt(durationSeconds.trim(), 10) : undefined;
+    const response = await fetch(`${INSPECTOR_BASE_URL}/api/observation/start`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(parsedDuration ? { durationSeconds: parsedDuration } : {}),
+    });
     const body = await response.json();
     setRecording(body.recording);
+    setEverRecorded(true);
   }
 
   return (
@@ -109,7 +124,7 @@ export function BrowserControllerPanel({ onChanged }: { onChanged?: () => void }
         </StatusBadge>
         {status.connected && (
           <StatusBadge kind={recording ? "success" : "warning"}>
-            {recording ? "observing network" : "observation paused"}
+            {recording ? "capturing traffic" : everRecorded ? "capture paused" : "capture not started"}
           </StatusBadge>
         )}
       </div>
@@ -130,12 +145,20 @@ export function BrowserControllerPanel({ onChanged }: { onChanged?: () => void }
           </button>
         ) : (
           <>
+            {!recording && (
+              <input
+                value={durationSeconds}
+                onChange={(e) => setDurationSeconds(e.target.value)}
+                placeholder="duration (s, optional)"
+                className="w-36 rounded border border-lab-border bg-black/40 px-2 py-1.5 text-[11px] text-lab-accent placeholder:text-neutral-600"
+              />
+            )}
             <button
               type="button"
               onClick={toggleObservation}
               className="rounded border border-lab-accent2 px-4 py-1.5 text-xs text-lab-accent2 transition hover:bg-lab-accent2 hover:text-black"
             >
-              {recording ? "stop observation" : "start observation"}
+              {recording ? "pause capture" : everRecorded ? "resume capture" : "start capture"}
             </button>
             <button
               type="button"
