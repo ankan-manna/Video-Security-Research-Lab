@@ -225,6 +225,14 @@ local synthetic fixture server or this repo's own locally-running `apps/api`, ne
 production application. Running it against your actual target is the one remaining verification
 step, and the Guided Workflow panel is built to make that straightforward.
 
+## Acceptance status
+
+[docs/FINAL_ACCEPTANCE_REPORT.md](docs/FINAL_ACCEPTANCE_REPORT.md) is the authoritative,
+requirement-by-requirement audit of this tool: what's verified, the exact test commands and
+results, known defects (and the one fixed during the audit), security limitations, and what's
+still unverified (an end-to-end run against a real deployed target — this repository's own
+development environment has no network path to one).
+
 ## Next step
 
 See [docs/ROADMAP.md](docs/ROADMAP.md)'s "Likely future prompts" — chiefly, running the full

@@ -16,7 +16,6 @@ const envSchema = z.object({
   ANALYSIS_MAX_REDIRECTS: z.coerce.number().int().nonnegative().default(3),
   RATE_LIMIT_WINDOW_MS: z.coerce.number().int().positive().default(60_000),
   RATE_LIMIT_MAX_REQUESTS: z.coerce.number().int().positive().default(30),
-  FINDINGS_STORE_PATH: z.string().default("./data/findings.json"),
   DASHBOARD_ORIGIN: z.string().default("http://localhost:3000"),
 
   ANALYSIS_HISTORY_STORE_PATH: z.string().default("./data/analysis-history.json"),
