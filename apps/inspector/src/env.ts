@@ -36,6 +36,17 @@ const envSchema = z.object({
   // dropped once either limit is exceeded, whichever triggers first.
   EVIDENCE_RETENTION_MAX_EVENTS: z.coerce.number().int().positive().default(5_000),
   EVIDENCE_RETENTION_MAX_AGE_HOURS: z.coerce.number().int().positive().default(72),
+
+  // Prompt 3: the security-test engine's own outbound requests (direct-resource authorization,
+  // resource/identifier validation — see src/security/). A minimum gap enforced between any two
+  // such requests, regardless of which test issues them — the one control between "a bounded,
+  // controlled test" and a tool that could hammer a real production target.
+  SECURITY_TEST_MIN_INTERVAL_MS: z.coerce.number().int().positive().default(500),
+  SECURITY_TEST_TIMEOUT_MS: z.coerce.number().int().positive().default(8_000),
+  SECURITY_TEST_MAX_RETRIES: z.coerce.number().int().min(0).default(1),
+  // Caps how many already-observed resources a single direct-resource-authorization run samples —
+  // deliberately small; this is a bounded check, never an enumeration.
+  SECURITY_TEST_MAX_RESOURCES_PER_RUN: z.coerce.number().int().positive().default(5),
 });
 
 export type Env = z.infer<typeof envSchema>;

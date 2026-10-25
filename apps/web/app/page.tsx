@@ -11,12 +11,14 @@ import { BrowserControllerPanel } from "@/components/BrowserControllerPanel";
 import { SessionMonitorPanel } from "@/components/SessionMonitorPanel";
 import { NetworkObservationPanel } from "@/components/NetworkObservationPanel";
 import { EvidenceInventoryPanel } from "@/components/EvidenceInventoryPanel";
+import { SecurityTestingPanel } from "@/components/SecurityTestingPanel";
 
 const NAV_SECTIONS = [
   { id: "target", label: "Target Configuration" },
   { id: "browser", label: "Browser & Session" },
   { id: "network", label: "Network Observation" },
   { id: "evidence", label: "Evidence" },
+  { id: "security-tests", label: "Security Tests" },
   { id: "research", label: "Research Workspace" },
 ];
 
@@ -91,6 +93,11 @@ export default function DashboardPage() {
       <section id="evidence" className="mt-10 scroll-mt-16">
         <SectionHeading>Video Chunk Analysis &amp; Evidence</SectionHeading>
         <EvidenceInventoryPanel refreshKey={evidenceRefreshKey} onCleared={bumpEvidence} />
+      </section>
+
+      <section id="security-tests" className="mt-10 scroll-mt-16">
+        <SectionHeading>Target-Based Authorization &amp; Session Security Test Engine</SectionHeading>
+        <SecurityTestingPanel />
       </section>
 
       <section id="research" className="mt-10 scroll-mt-16">

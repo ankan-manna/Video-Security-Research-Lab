@@ -34,7 +34,8 @@ apps/web        Next.js dashboard (dark/hacker-style UI)
 apps/api        Fastify backend: URL analysis, HAR import, manifest parsing (standalone analysis
                  utilities, independent of the inspector below)
 apps/inspector  Fastify service: target config, Playwright browser controller, session lifecycle
-                 monitor, network observation, video-chunk/evidence analysis — the actual tool
+                 monitor, network observation, video-chunk/evidence analysis, and a controlled
+                 security-test engine (src/security/) — the actual tool
 packages/security  Shared SSRF/URL-safety guard, safeFetch, and redaction (header + URL query-param)
 packages/manifest  Shared HLS/DASH manifest parsers
 ```
@@ -100,7 +101,17 @@ Open `http://localhost:3000`. The dashboard sections, in order:
    failed-only) links each observed segment request to the manifest that declared it, with a
    coverage report comparing what the manifest declared against what the browser actually received
    (received / missing / failed). "Clear evidence" deletes everything this tool has recorded.
-6. **Research Workspace** — the standalone `apps/api` utilities: submit a URL for metadata analysis,
+6. **Target-Based Authorization & Session Security Test Engine** — a catalog of five controlled test
+   categories (A–E, see [docs/SECURITY_MODEL.md](docs/SECURITY_MODEL.md)'s "Security-test engine"
+   section for exactly what each one checks and how). Each card shows its objective, preconditions,
+   expected result, and required confirmation. Click "run test" to execute it against the actual
+   configured target — never a simulated one. The one state-changing test (membership revocation)
+   requires you to check an explicit confirmation box first, since its precondition is a real change
+   you make yourself in the target's own UI. "stop all tests" aborts whatever is currently running.
+   Results appear in a history table (click a row to expand its evidence); any `fail` outcome also
+   produces an entry in the Findings panel with remediation guidance. "clear results" deletes the
+   history and findings.
+7. **Research Workspace** — the standalone `apps/api` utilities: submit a URL for metadata analysis,
    import a HAR capture exported from DevTools, or paste/fetch a manifest directly. Independent of
    the inspector above; useful as a secondary, complementary analysis path.
 
@@ -140,6 +151,13 @@ per-workspace test counts as of the current stage.
 | `GET` | `/api/evidence/sessions` | Captured evidence grouped by browser-launch (capture session). |
 | `GET` | `/api/evidence/export?format=json\|csv` | Downloads already-redacted traffic metadata as an attachment. Never includes raw cookies, Authorization headers, or tokens. |
 | `POST` | `/api/evidence/clear` | Deletes all captured evidence. |
+| `GET` | `/api/security/tests` | The security-test catalog — id, category, description, objective, preconditions, required session state, whether it requires confirmation. |
+| `GET` | `/api/security/status` | Whether a test is currently running, and which one. |
+| `POST` | `/api/security/tests/:id/run` | Runs one test against the actual configured target. Body: `{ confirmed?: boolean, phase?: "arm" \| "evaluate", ... }` — `confirmed: true` is required for a test whose catalog entry has `requiresConfirmation: true`; `phase` is used only by `membership-revocation`'s two-phase workflow. Responds `409` with `{error: "confirmation_required" \| "no_target_config" \| "already_running"}` or `404` with `{error: "unknown_test"}` when it can't run. |
+| `POST` | `/api/security/stop` | Aborts whatever test is currently running. Always responds `200`, even if nothing was running. |
+| `GET` | `/api/security/results` | Every past test execution (newest first) — expected/actual result, outcome, sanitized evidence, remediation, limitations. |
+| `GET` | `/api/security/findings` | Findings derived only from `fail` outcomes — never from pass/skipped/inconclusive. |
+| `POST` | `/api/security/results/clear` | Deletes all security-test results and findings. |
 
 ### `apps/api` (unchanged analysis utilities)
 
@@ -159,15 +177,18 @@ Full request/response shapes and configuration: [docs/ARCHITECTURE.md](docs/ARCH
 ## Known limitations
 
 See [docs/SECURITY_MODEL.md](docs/SECURITY_MODEL.md)'s "Threats explicitly out of scope" and
-[docs/ROADMAP.md](docs/ROADMAP.md)'s "Not built in Prompt 2" for the full, honest list —
-summarized: no automated security-test execution yet (observation, analysis, and export only), no
-rate limiting or auth on the local services themselves (acceptable for a local, single-operator
-tool), no media-element-level playback confirmation (an HTTP 200 is explicitly never presented as
-proof of decode/playback), and the login-detection heuristic in the session monitor is exactly
-that — a heuristic, documented as such.
+[docs/ROADMAP.md](docs/ROADMAP.md)'s "Not built in Prompt 3" for the full, honest list —
+summarized: no rate limiting or auth on the local services themselves (acceptable for a local,
+single-operator tool), no media-element-level playback confirmation (an HTTP 200 is explicitly
+never presented as proof of decode/playback), the login-detection heuristic in the session monitor
+is exactly that — a heuristic, no automated replay of a captured authenticated request (the
+direct-resource-authorization test only ever sends genuinely unauthenticated requests), no
+cross-account comparison (G1 vs. G2 side by side), and the security-test engine only samples a
+small, bounded set of already-observed resources — it never enumerates or guesses URLs the browser
+hasn't already produced.
 
 ## Next step
 
-See [docs/ROADMAP.md](docs/ROADMAP.md) for what's likely to come next — Prompt 3: controlled
-security tests against the real target, built from the evidence this stage now captures and
-exports.
+See [docs/ROADMAP.md](docs/ROADMAP.md) for what's likely to come next — a final integration pass
+tying the observation, analysis, and security-test stages together into one coherent workflow and
+report.

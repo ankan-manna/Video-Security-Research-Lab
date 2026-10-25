@@ -7,6 +7,11 @@ import { NetworkObserver } from "./network/observer.js";
 import { attachManifestCapture, type ManifestCaptureAttachment } from "./evidence/manifestCapture.js";
 import { EvidenceStore } from "./evidence/store.js";
 import { TargetConfigStore } from "./targetConfig/store.js";
+import { safeFetch } from "@research-lab/security";
+import { RateLimiter } from "./security/rateLimiter.js";
+import { SecurityTestStore } from "./security/store.js";
+import { SecurityTestRunner } from "./security/runner.js";
+import { registerBuiltInSecurityTests } from "./security/tests/index.js";
 import type { Env } from "./env.js";
 
 const PERSIST_INTERVAL_MS = 5_000;
@@ -24,6 +29,22 @@ export class InspectorService {
   readonly sessionMonitor = new SessionMonitor();
   readonly networkObserver: NetworkObserver;
   readonly evidenceStore: EvidenceStore;
+
+  /** Prompt 3: the controlled security-test engine. See src/security/. */
+  readonly securityTestStore: SecurityTestStore;
+  readonly securityTestRunner: SecurityTestRunner;
+  readonly securityRateLimiter: RateLimiter;
+  readonly securityTestOptions: { timeoutMs: number; maxRetries: number; maxResourcesPerRun: number };
+  /**
+   * The fetch implementation the security-test engine's own outbound requests (categories D/E)
+   * go through — defaults to the real, SSRF-guarded `safeFetch`, unchanged in production. A plain
+   * mutable field (not a constructor option) purely so automated tests can swap in a real-but-
+   * unguarded fetcher against a local synthetic fixture server, which `safeFetch`'s loopback/
+   * private-address rejection would otherwise always and correctly refuse to reach — see
+   * test/security/tests/directResourceAuthorization.test.ts. Nothing in this codebase exposes a
+   * way to change this over HTTP; only code already running in this process can reassign it.
+   */
+  securityFetchImpl: typeof safeFetch = safeFetch;
 
   private sessionAttachment: SessionMonitorAttachment | null = null;
   private manifestAttachment: ManifestCaptureAttachment | null = null;
@@ -49,10 +70,25 @@ export class InspectorService {
 
     this.networkObserver.on("event", (event) => this.evidenceStore.recordEvent(event));
     this.browser.on("disconnected", () => this.handleBrowserDisconnected());
+
+    this.securityTestStore = new SecurityTestStore(
+      path.join(env.INSPECTOR_DATA_DIR, "security-test-results.json"),
+      path.join(env.INSPECTOR_DATA_DIR, "security-test-findings.json"),
+      (message) => console.warn(`[inspector] ${message}`),
+    );
+    this.securityRateLimiter = new RateLimiter(env.SECURITY_TEST_MIN_INTERVAL_MS);
+    this.securityTestOptions = {
+      timeoutMs: env.SECURITY_TEST_TIMEOUT_MS,
+      maxRetries: env.SECURITY_TEST_MAX_RETRIES,
+      maxResourcesPerRun: env.SECURITY_TEST_MAX_RESOURCES_PER_RUN,
+    };
+    this.securityTestRunner = new SecurityTestRunner(this, this.securityTestStore);
+    registerBuiltInSecurityTests(this.securityTestRunner);
   }
 
   async init(): Promise<void> {
     await this.evidenceStore.load();
+    await this.securityTestStore.load();
     const config = await this.targetConfigStore.load();
     if (config) this.evidenceStore.setRetention(config.evidenceRetention);
   }
@@ -112,7 +148,9 @@ export class InspectorService {
 
   async shutdown(): Promise<void> {
     if (this.persistTimer) clearInterval(this.persistTimer);
+    this.securityTestRunner.requestStop();
     await this.browser.close().catch(() => {});
     await this.evidenceStore.persist().catch(() => {});
+    await this.securityTestStore.persist().catch(() => {});
   }
 }

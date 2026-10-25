@@ -1,8 +1,8 @@
 import { promises as fs } from "node:fs";
-import path from "node:path";
 import type { NetworkEvent } from "../network/types.js";
 import type { ManifestRecord, ManifestParseFailure, SegmentInventoryItem, ManifestCoverageReport } from "./types.js";
 import { buildSegmentInventory, buildManifestCoverageReport } from "./linking.js";
+import { atomicWriteJson, readJsonArray } from "../lib/jsonStore.js";
 
 export interface EvidenceRetentionSettings {
   maxEvents: number;
@@ -15,48 +15,6 @@ export interface CaptureSessionSummary {
   manifestCount: number;
   firstEventAt: string;
   lastEventAt: string;
-}
-
-async function atomicWriteJson(filePath: string, data: unknown): Promise<void> {
-  await fs.mkdir(path.dirname(filePath), { recursive: true });
-  const tmpPath = path.join(
-    path.dirname(filePath),
-    `.${path.basename(filePath)}.${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2)}.tmp`,
-  );
-  await fs.writeFile(tmpPath, JSON.stringify(data, null, 2), "utf8");
-  await fs.rename(tmpPath, filePath);
-}
-
-/**
- * Reads a persisted JSON array. Tolerates two distinct failure modes
- * without crashing the whole service: the file not existing yet (normal,
- * first run) and the file existing but containing malformed/corrupted JSON
- * (e.g. an unclean shutdown mid-write, or a temp-file rename that was
- * interrupted at the filesystem level despite the atomic-write pattern
- * used elsewhere). The original version only handled the first case —
- * a corrupted file threw an uncaught `SyntaxError` out of `EvidenceStore.load()`,
- * which would have crashed the service on startup. Both cases now log a
- * warning (via the optional `onWarning` callback) and start from an empty
- * list rather than propagating — "safe handling of malformed metadata" is
- * a behavior, not just a doc comment.
- */
-async function readJsonArray<T>(filePath: string, onWarning?: (message: string) => void): Promise<T[]> {
-  let raw: string;
-  try {
-    raw = await fs.readFile(filePath, "utf8");
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === "ENOENT") return [];
-    onWarning?.(`Could not read ${filePath}: ${(error as Error).message}. Starting from an empty list.`);
-    return [];
-  }
-
-  try {
-    const parsed = JSON.parse(raw);
-    return Array.isArray(parsed) ? (parsed as T[]) : [];
-  } catch (error) {
-    onWarning?.(`${filePath} contains malformed JSON (${(error as Error).message}). Starting from an empty list.`);
-    return [];
-  }
 }
 
 /**

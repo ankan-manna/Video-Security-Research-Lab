@@ -186,20 +186,92 @@ Every HTTP request body in `apps/inspector` is validated with Zod (`targetConfig
 never a stack trace. `POST /api/browser/navigate` additionally rejects any non-`http`/`https`
 protocol (e.g. `javascript:`) explicitly, tested directly.
 
+## The security-test engine (`apps/inspector/src/security/`, Prompt 3)
+
+Five controlled test categories run against the *actual configured target* — never a second,
+simulated platform. Every structural guarantee below is enforced in code, not left to each test
+author to remember.
+
+- **Confirmation gate for state-changing preconditions.** `SecurityTestRunner.run()` refuses to
+  execute a `TestDefinition` whose `requiresConfirmation` is `true` unless the request body
+  includes `confirmed: true` — today, only `membership-revocation`, because its real precondition
+  (G2's membership actually being revoked) happens entirely outside this tool, in the target's own
+  UI, by the operator's own hand. This tool never revokes anything itself.
+- **Precondition gate.** A test declaring `requiredAuthState` is reported `skipped` — never run
+  with a fabricated result — when `SessionMonitor`'s current state doesn't match. `skipped` is
+  persisted to the results history like any other outcome, with the actual reason stated.
+- **Scope enforcement happens before any network call, not after.** `scopedFetch()`
+  (`security/scopedFetch.ts`) calls `isOriginApproved()` first; a URL outside the saved target
+  config's `effectiveApprovedOrigins` never reaches the network at all — regression-tested in
+  `test/security/scopedFetch.test.ts` and `test/security/tests/resourceValidation.test.ts` via an
+  injected fetch spy that asserts zero calls for an out-of-scope probe URL.
+- **Every request this engine sends is genuinely unauthenticated, by construction.** `scopedFetch`
+  delegates to `@research-lab/security`'s `safeFetch`, which attaches no cookies, no Authorization
+  header, and nothing captured from the browser. This engine never replays a captured authenticated
+  request and never exports or reuses session material to simulate one — the direct-resource-
+  authorization test (D) can only ever check the unauthenticated-request case; expired-session (B)
+  and revoked-member (C) denial are evaluated separately, by reasoning about the real browser's own
+  session signals and newly-observed traffic, never by replay.
+- **Rate-limited, timed-out, and bounded.** A single `RateLimiter` instance
+  (`SECURITY_TEST_MIN_INTERVAL_MS`, default 500ms) is shared by every test that issues its own
+  request; each request has a timeout (`SECURITY_TEST_TIMEOUT_MS`) and a small number of bounded
+  retries (`SECURITY_TEST_MAX_RETRIES`) applied only to transient network/timeout failures, never to
+  an authorization-relevant 4xx (retrying a denial would be probing, not a controlled check).
+  Direct-resource-authorization additionally caps how many already-observed resources one run
+  samples (`SECURITY_TEST_MAX_RESOURCES_PER_RUN`) — a bounded check, never an enumeration.
+- **A real global stop.** `POST /api/security/stop` aborts the `AbortSignal` the currently-running
+  test was given. Every request-issuing test checks that signal both before waiting on the rate
+  limiter and before sending, so a stop takes effect between requests, not only at the next natural
+  checkpoint — tested directly in `test/security/runner.test.ts`.
+- **One test at a time.** `SecurityTestRunner` refuses to start a second test while one is running
+  (`already_running`), so there's never a race between two tests' rate-limited requests.
+- **Never claims proof it doesn't have.** Every category distinguishes an *observed request* from a
+  *successful response* from *proven authorization* — e.g. baseline access (A) explicitly notes
+  whether `SessionMonitor` independently reached `session_validity_confirmed`, rather than treating
+  an HTTP 200 alone as proof. When a test can't safely isolate the condition it's checking (no
+  evidence yet, an ambiguous status, a request that never completed), it reports `inconclusive`
+  — never a guessed `pass` or `fail`.
+- **Findings only ever come from a `fail` outcome** (`security/findings.ts`) — `pass`, `skipped`,
+  and `inconclusive` never produce one. A finding's `confidence` is derived mechanically from how
+  much evidence backed the result (two or more corroborating evidence items → `high`; one → `medium`;
+  reasoning alone → `low`), not asserted by the test itself, so "never claim a vulnerability is
+  confirmed if the evidence is insufficient" is a property of how confidence is computed.
+- **Sanitized evidence and persistence.** `TestResult`/`Finding` evidence items carry only a
+  description, a redacted URL, an HTTP status, and a timestamp — the same redaction already applied
+  by `NetworkObserver`/`redactUrl` at capture time (see above); nothing in the security-test engine
+  re-introduces an unredacted value. Results and findings persist via the same atomic-write /
+  tolerant-read JSON pattern as `EvidenceStore`, extracted into `lib/jsonStore.ts` in this stage
+  specifically so both stores share one implementation.
+
+### A deliberate test-only seam
+
+`InspectorService.securityFetchImpl` defaults to the real `safeFetch` and is unchanged in
+production. It exists purely so automated tests can swap in a real-but-unguarded fetcher against a
+local synthetic fixture server, which `safeFetch`'s loopback/private-address rejection would
+otherwise (correctly) always refuse to reach. Nothing in this codebase exposes a way to change it
+over HTTP — only code already running in this same process can reassign it.
+
 ## Threats explicitly out of scope for this stage
 
-- **No rate limiting on `apps/inspector`.** A local, single-operator tool driving one browser has
-  no competing tenants to protect from each other — revisit if that assumption changes.
+- **No rate limiting on `apps/inspector`'s own HTTP API.** A local, single-operator tool driving one
+  browser has no competing tenants to protect from each other — revisit if that assumption changes.
+  (The security-test engine's *outbound* requests to the target are rate-limited — see above; this
+  bullet is about the inspector's own inbound API.)
 - **No authentication on the dashboard or inspector API itself.** Anyone who can reach
   `localhost:3000`/`:4002` can use this tool — acceptable for a local research tool, would need
   revisiting before any shared/networked deployment.
-- **No automated security test execution against the real target yet** — Prompts 1 and 2 together
-  are observation, analysis, and evidence export only; that's Prompt 3. See
-  `docs/ARCHITECTURE.md`'s "What's deliberately not built yet."
 - **No media-element-level playback confirmation.** An HTTP 200 is reported as exactly that — a
   response was received — never as proof the segment was decoded or played. This is enforced by
   never claiming the stronger fact anywhere in code, UI copy, or export output, not by instrumenting
   the `<video>` element itself as a second signal source.
+- **No cross-account ("a resource belonging to another user's private content") authorization
+  check.** The current target configuration tracks exactly one members-only video URL; there is no
+  second, distinct private resource configured to safely test against. The direct-resource-
+  authorization test (D) says so explicitly in its own limitations rather than fabricating a
+  check against an invented resource.
+- **No enumeration.** Resource/identifier validation (E) mutates exactly one already-observed URL
+  into a malformed and a nonexistent variant — two requests, not a scan — plus one purely local
+  scope check that never touches the network.
 - **The login-shaped-URL heuristic (`/login`, `/signin`, etc.) is exactly that — a heuristic.** A
   target using an unconventional login path won't be detected by it. It only ever contributes to
   the *cautious* states (`authentication_may_have_expired`, `session_renewal_suspected`), never to

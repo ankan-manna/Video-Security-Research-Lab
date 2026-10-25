@@ -29,7 +29,8 @@ mock-video-platform direction, and exactly what was kept/moved/removed and why, 
 │  │                  from the prior project; still useful as a standalone analysis surface,
 │  │                  e.g. importing a HAR exported from DevTools)
 │  └─ inspector/    Fastify service — target config, Playwright browser controller, session
-│                     lifecycle monitor, network observation, video-chunk/evidence analysis.
+│                     lifecycle monitor, network observation, video-chunk/evidence analysis,
+│                     and a controlled security-test engine (src/security/, Prompt 3).
 │                     The actual security-testing tool.
 ├─ packages/
 │  ├─ security/     Shared SSRF/URL-safety guard, IP-pinned safeFetch, and redaction
@@ -128,6 +129,46 @@ GET /api/evidence/export          → eventsToJson()/eventsToCsv() (exportFormat
                                       redaction already applied
 ```
 
+### Security-test engine (Prompt 3)
+
+```
+POST /api/security/tests/:id/run { confirmed?, phase?, ... }
+  → SecurityTestRunner.run(testId, input)
+      → look up TestDefinition in the catalog (unknown id → 404)
+      → already running another test? → 409 already_running
+      → load the saved TargetConfig (none saved → 409 no_target_config)
+      → definition.requiresConfirmation && !input.confirmed → 409 confirmation_required
+      → definition.requiredAuthState set and SessionMonitor's current state doesn't match
+            → outcome "skipped", persisted, no finding, no network call
+      → otherwise: new AbortController → definition.run({service, config, signal, input})
+      → SecurityTestStore.recordResult(); outcome === "fail" → also recordFinding()
+      → SecurityTestStore.persist() (atomic JSON, same lib/jsonStore.ts helpers as EvidenceStore)
+
+POST /api/security/stop → SecurityTestRunner.requestStop() — aborts the current AbortSignal;
+                            every test that issues its own request (D/E) checks it between requests
+```
+
+Five built-in `TestDefinition`s (`src/security/tests/`), registered once at startup
+(`registerBuiltInSecurityTests`):
+
+- **A — baseline-authenticated-access**: purely observational, reads `EvidenceStore`/
+  `SessionMonitor`, issues no request of its own.
+- **B — session-expiry-behavior**: purely observational, reads `SessionMonitor`'s own transition
+  history plus post-signal `EvidenceStore` events. Never forces expiration.
+- **C — membership-revocation**: the one `requiresConfirmation: true` test — a guided two-phase
+  workflow (`phase: "arm"` records a baseline marker as an evidence item on that execution;
+  `phase: "evaluate"`, run later, reads it back from `SecurityTestStore.getResults()` and compares
+  only events captured after it). No network request of its own either; the operator's own
+  revisit through the normal Browser Controller panel is what produces the evidence it reads.
+- **D — direct-resource-authorization** and **E — resource-identifier-validation**: the two
+  categories that issue real requests, always through `scopedFetch()` (`src/security/
+  scopedFetch.ts`) — never directly through `fetch`/`safeFetch`. `scopedFetch` checks
+  `isOriginApproved()` locally before anything else (a request to an unapproved origin never
+  reaches the network), waits its turn on a shared `RateLimiter` (`SECURITY_TEST_MIN_INTERVAL_MS`),
+  and delegates the actual I/O to `@research-lab/security`'s `safeFetch` (reused, not
+  reimplemented) — which attaches no cookies or Authorization header, so every request this engine
+  sends is genuinely unauthenticated by construction.
+
 ## Module boundaries and reuse
 
 - `packages/security` owns every SSRF/origin/redaction decision shared across apps. `apps/api`'s
@@ -141,18 +182,26 @@ GET /api/evidence/export          → eventsToJson()/eventsToCsv() (exportFormat
   + storage), `browser/` (controller, session monitor, their Playwright-attachment wiring),
   `network/` (observer, resource classification + confidence), `evidence/` (manifest capture,
   manifest-parse-failure surfacing, segment/manifest linking, coverage reporting, capture-session
-  grouping, JSON/CSV export, persistence). `service.ts` is the one place these are wired together
-  (including generating and threading the per-launch `sessionId`); `routes/*.ts` are thin Fastify
-  handlers over `InspectorService`.
+  grouping, JSON/CSV export, persistence), `security/` (Prompt 3: test types, rate limiter, scoped
+  fetch, runner, findings, persistence, and `security/tests/` — the five test-category
+  implementations). `service.ts` is the one place these are wired together (including generating
+  and threading the per-launch `sessionId`, and registering the security-test catalog);
+  `routes/*.ts` are thin Fastify handlers over `InspectorService`.
+- `src/lib/jsonStore.ts` holds the atomic-write / tolerant-read JSON helpers (`atomicWriteJson`,
+  `readJsonArray`) that originated inline in `evidence/store.ts` during Prompt 2 and were extracted
+  here in Prompt 3 specifically so `security/store.ts` reuses the identical persistence guarantees
+  rather than a second implementation.
 - `apps/web` owns presentation only — it talks to `apps/api` and `apps/inspector` over HTTP exactly
   as any external client would, holding no business logic of its own. `TargetConfigPanel`,
   `BrowserControllerPanel` (Prompt 1; extended in Prompt 2 with a capture-duration input and
   start/pause/resume labeling), `SessionMonitorPanel`, `NetworkObservationPanel` (rewritten in
   Prompt 2 into the full live traffic timeline with filters, expandable request details, and
-  export links), and `EvidenceInventoryPanel` (rewritten in Prompt 2 with HLS/DASH structure detail,
-  manifest-parse-failures, capture-sessions, and a filterable segment inventory) are the panels this
-  stage's two prompts added; `UrlForm`/`AnalysisHistory`/`HarUpload`/`ManifestInspector` are
-  unchanged clients of `apps/api`.
+  export links), `EvidenceInventoryPanel` (rewritten in Prompt 2 with HLS/DASH structure detail,
+  manifest-parse-failures, capture-sessions, and a filterable segment inventory), and
+  `SecurityTestingPanel` (Prompt 3: catalog, confirmation gating, execution history with an
+  evidence viewer, findings/remediation, global stop) are the panels this stage's three prompts
+  added; `UrlForm`/`AnalysisHistory`/`HarUpload`/`ManifestInspector` are unchanged clients of
+  `apps/api`.
 
 ## Two deliberate non-restrictions, both documented at their source
 
@@ -170,20 +219,19 @@ GET /api/evidence/export          → eventsToJson()/eventsToCsv() (exportFormat
 
 ## What's deliberately not built yet
 
-Prompts 1 and 2 together are observation, analysis, and evidence export only. Not yet built, and
-not assumed:
-
-- Any automated security *test execution* against the real target (the old project's
-  "Security Testing Engine" tested its own mock app — that pattern doesn't carry over directly; a
-  future stage would need to design real-target tests around observed evidence, respecting
-  `SessionMonitor.shouldPauseTests()`). This is Prompt 3 — see [ROADMAP.md](ROADMAP.md).
 - Media-element-level playback confirmation (instrumenting `<video>`'s own `playing`/`error`
   events as a second signal alongside network evidence) — not needed to satisfy "never infer
   playback from HTTP 200," since that's already enforced by never claiming decode/playback success
   from network evidence alone; noted as a real option for a future stage, not assumed necessary.
 - Multi-session or multi-account comparison (e.g. automatically diffing a G1 vs. G2 session) —
-  today the operator manually drives one browser session at a time; Prompt 2's `sessionId`/capture-
-  sessions grouping tracks *sequential* launches, not a side-by-side diff.
-- Real-time push (SSE/WebSocket) for network events — the dashboard polls, matching the rest of
-  this project's established pattern; acceptable at this scale, revisit only if it becomes a real
-  bottleneck.
+  today the operator manually drives one browser session at a time; `sessionId`/capture-sessions
+  grouping tracks *sequential* launches, not a side-by-side diff.
+- Real-time push (SSE/WebSocket) for network events or security-test progress — the dashboard
+  polls, matching the rest of this project's established pattern; acceptable at this scale, revisit
+  only if it becomes a real bottleneck.
+- Replaying a captured *authenticated* request to test expired/revoked-session denial directly —
+  the security-test engine never does this (see SECURITY_MODEL.md); tests B and C instead reason
+  from the real browser's own session signals and newly-observed traffic.
+- A unified, exportable report spanning observation + analysis + security-test results in one
+  document — each is available via its own API/export today, not yet combined. See
+  [ROADMAP.md](ROADMAP.md)'s "Likely future prompts."

@@ -30,10 +30,10 @@ export interface SessionMonitorSnapshot {
   pausedForReauthentication: boolean;
 }
 
-/** Heuristic only, documented as such everywhere it's used — never treated as certain. */
+/** Heuristic only, documented as such everywhere it's used — never treated as certain. Exported so the security-test engine (Prompt 3) reuses the exact same heuristic rather than a near-duplicate pattern. */
 const LOGIN_PATH_PATTERN = /\/(login|signin|sign-in|log-in|auth|authenticate)(\/|$|\?)/i;
 
-function isLoginShapedUrl(rawUrl: string): boolean {
+export function isLoginShapedUrl(rawUrl: string): boolean {
   try {
     return LOGIN_PATH_PATTERN.test(new URL(rawUrl).pathname);
   } catch {

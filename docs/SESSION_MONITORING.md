@@ -12,6 +12,20 @@ operator's browser session, and exactly what it does and does not treat as proof
 > history table). Nothing here needed to change; this is stated explicitly rather than silently
 > re-describing the same design as if it were new work.
 
+> **Prompt 3 note**: this module's logic is unchanged again. The security-test engine's
+> session-expiry test (category B, `security/tests/sessionExpiry.ts`) reads this module's state and
+> history purely as a consumer — it never forces a transition, and it is the thing that *verifies*
+> `shouldPauseTests()` is behaving as expected, by surfacing its current value (and the state that
+> produced it) as part of every result it reports. A deliberate scoping decision: the test runner
+> does **not** add a blanket rule that blocks every other test category while
+> `shouldPauseTests()` is true. Categories D and E test the *unauthenticated*-request case
+> specifically, which doesn't depend on this tool's tracked session being valid at all; category B
+> is literally *about* the paused/expired state, so blocking it exactly when that state occurs
+> would be self-defeating. Category A (baseline access) and C (membership revocation) already
+> report honestly from whatever evidence exists rather than assuming a stale session means stale
+> evidence — see docs/SECURITY_MODEL.md's "The security-test engine." This interpretation is
+> recorded here explicitly, as a judgment call, rather than silently assumed.
+
 ## The six states
 
 | State | What it means | How it's reached |

@@ -64,11 +64,12 @@ Audited the full existing repository before changing anything (see REFACTOR_PLAN
 ### Not built in Prompt 1 (explicitly out of scope at the time — see Prompt 2 below for what closed these)
 
 - ~~Evidence export/reporting~~ — closed in Prompt 2 (JSON/CSV export of sanitized traffic).
-- Any automated security *test execution* against the real target — still not built; see Prompt 3.
+- ~~Any automated security *test execution* against the real target~~ — closed in Prompt 3 (the
+  controlled security-test engine).
 - Any UI/flow specific to "G1" or "G2" as named roles — this tool observes whichever account the
   operator is manually signed in as; it has no concept of synthetic accounts anymore.
 
-## Prompt 2 — Live traffic timeline and video segment inspection ✅ (this stage)
+## Prompt 2 — Live traffic timeline and video segment inspection ✅
 
 Audited Prompt 1 against its own docs first (full test suite re-run, 109/109 passing before any
 change), then extended the existing modules rather than replacing them:
@@ -118,24 +119,101 @@ change), then extended the existing modules rather than replacing them:
   `packages/security`, `packages/manifest`, and `apps/api` are unaffected by this stage — see the
   README's "Running tests" section for the exact, currently-passing monorepo-wide total.
 
-### Not built in Prompt 2 (explicitly out of scope — "Prompt 2 only")
+### Not built in Prompt 2 (explicitly out of scope at the time — see Prompt 3 below for what closed this)
 
-- Any automated security *test execution* against the real target — Prompt 2 is observation,
-  analysis, and evidence export; it still doesn't decide pass/fail against a target's authorization
-  behavior. That's Prompt 3.
+- ~~Any automated security *test execution* against the real target~~ — closed in Prompt 3 (the
+  controlled security-test engine).
 - Media-element-level playback confirmation (e.g. instrumenting `<video>`'s own `playing`/`error`
   events) — the explicit "don't infer playback from HTTP 200" requirement is satisfied by never
   claiming decode/playback success from network evidence alone (the UI and docs say so explicitly),
   not by adding a second, JS-injected signal source. Noted as a real option for a future prompt if
-  finer-grained playback confirmation becomes necessary, not assumed necessary now.
+  finer-grained playback confirmation becomes necessary, not assumed necessary now. Still not built.
+
+## Prompt 3 — Target-based authorization and session security test engine ✅ (this stage)
+
+Audited Prompts 1 and 2's actual implementation first (target scope, captured-request shape,
+observed URLs/responses, session-state signals) before writing anything, per the explicit "inspect
+before implementing" instruction, then built a new, additive module rather than touching the
+existing observation pipeline:
+
+- **A reusable test framework** (`apps/inspector/src/security/`): a `TestDefinition` interface
+  (id, category, description, objective, preconditions, required auth state, expected result,
+  whether it requires confirmation) and a `SecurityTestRunner` that executes one at a time against
+  the *actual configured target*, gates state-changing tests behind an explicit `confirmed: true`,
+  skips (never fabricates) a result when a declared precondition isn't met, and exposes a real
+  `requestStop()` that aborts an in-flight test's `AbortSignal` promptly.
+- **Scope, rate-limit, and credential boundaries, enforced in code**: `scopedFetch()` checks the
+  saved target config's approved origins *before* any network call (a request to an unapproved
+  origin never reaches the network, not just "is filtered afterward"), waits on a shared
+  `RateLimiter` (`SECURITY_TEST_MIN_INTERVAL_MS`), applies a timeout and a small number of
+  bounded retries (transient failures only, never retrying a denial), and delegates the actual I/O
+  to `@research-lab/security`'s existing `safeFetch` — reused, not reimplemented — which attaches
+  no cookies or Authorization header, so every request this engine sends is genuinely
+  unauthenticated by construction. This tool never replays a captured authenticated request.
+- **Five test categories** (`security/tests/`):
+  - **A — baseline authenticated access**: purely observational (reads already-captured evidence +
+    `SessionMonitor`), distinguishing an observed HTTP success from `SessionMonitor` independently
+    reaching `session_validity_confirmed`.
+  - **B — session-expiry behavior**: purely observational, reads `SessionMonitor`'s own transition
+    history; never forces expiration by manipulating target internals.
+  - **C — membership revocation**: the one state-changing, confirmation-gated test — a guided
+    two-phase workflow (`arm` records a baseline; `evaluate`, run after the operator revokes
+    membership and revisits the video through the normal Browser Controller panel, compares only
+    requests captured *after* the baseline) — deliberately never treats media already buffered
+    before revocation as evidence either way.
+  - **D — direct-resource authorization**: samples a small, bounded set of already-observed
+    manifest/segment URLs and requests each again with no authentication attached, checking whether
+    the target denies them. Explicitly scoped to the unauthenticated case in its own documented
+    limitations — expired-session and revoked-member denial are B's and C's job, against the real
+    browser's own session, not replayed here.
+  - **E — resource/identifier validation**: mutates one already-observed URL into a malformed and a
+    nonexistent variant (two requests, not a scan), plus one purely local check proving this tool's
+    own scope enforcement never sends a request to an unapproved origin.
+- **Findings and audit trail** (`security/findings.ts`, `security/store.ts`): a `Finding` is
+  produced only from a `fail` outcome — never from pass/skipped/inconclusive — with a `confidence`
+  derived mechanically from how much evidence backed the result, not asserted by the test. Results
+  and findings persist via the same atomic-write/tolerant-read JSON pattern `EvidenceStore` already
+  used, extracted into a new shared `src/lib/jsonStore.ts` in this stage so both stores share one
+  implementation rather than two copies.
+- **Dashboard** (`apps/web/components/SecurityTestingPanel.tsx`): a test catalog (objective,
+  preconditions, expected result, a confirmation checkbox + phase selector for the one
+  state-changing test), run/stop controls, an execution-history table with a click-to-expand
+  evidence viewer, and a findings/remediation panel.
+- **Tests**: 177 passing in `apps/inspector` (up from 123 in Prompt 2) — the new coverage spans
+  rate-limiter timing/abort behavior, scope enforcement (asserting zero network calls for an
+  out-of-scope URL via an injected fetch spy), retry/no-retry behavior, runner lifecycle
+  (confirmation gate, precondition skip, already-running rejection, prompt cancellation via
+  `requestStop()`, findings-only-from-fail), and all five test categories' decision logic driven
+  against either directly-seeded `EvidenceStore`/`SessionMonitor` state or a local synthetic HTTP
+  fixture server — no real target, no real credentials, consistent with every prior stage's testing
+  discipline. A deliberate, documented test-only seam (`InspectorService.securityFetchImpl`,
+  defaulting to the real `safeFetch` in production) lets these tests exercise a real HTTP round trip
+  against the local fixture server, which `safeFetch`'s own (correct) loopback-address rejection
+  would otherwise always refuse to reach.
+- **Live-target integration**: not exercised against the user's real deployed target as part of
+  this stage's automated verification — see the final summary's "steps needed for the final
+  integration module" for what that requires (a saved target config pointing at the real app, a
+  manual G2 sign-in, and the operator's own judgment call on which tests are safe to run against
+  production data). Reported separately from the fixture-based automated results above, per the
+  explicit "report live-target integration results separately" instruction.
+
+### Not built in Prompt 3 (explicitly out of scope — "Prompt 3 only")
+
+- A blanket rule pausing every test category while `SessionMonitor.shouldPauseTests()` is true —
+  deliberately not added; see docs/SESSION_MONITORING.md's Prompt 3 note for why (it would block
+  category B exactly when it's most relevant, and categories D/E don't depend on this tool's
+  tracked session being valid at all).
+- A unified report spanning observation + analysis + security-test results in one document — each
+  is available via its own API/export today, not yet combined into one artifact.
+- Any UI/flow that names "G1"/"G2" as roles — this tool still has no concept of synthetic accounts;
+  "G2" in these docs describes the user's own test setup, not something this tool models.
 
 ## Likely future prompts (not started, not designed in detail yet)
 
-- **Prompt 3** (per the user's own stated plan): controlled security tests against the configured
-  real target, built from observed evidence and respecting `SessionMonitor.shouldPauseTests()` —
-  e.g. "did the browser ever receive a 200 for a members-only segment while
-  `session_renewal_suspected` rather than `session_validity_confirmed`?" — rather than controlling
-  a fixture app directly, the way the removed mock-platform engine did.
+- **A final integration module** (per the user's own closing instruction on Prompt 3): tying the
+  observation (Prompt 2), analysis, and security-test (Prompt 3) stages together into one coherent
+  workflow and exportable report, and exercising the whole pipeline against the user's actual
+  deployed target rather than only local fixtures.
 - Possibly: a second concurrent browser profile to compare two sessions (e.g. owner vs. member)
   side by side, if that turns out to be more useful than sequential manual sign-ins.
 

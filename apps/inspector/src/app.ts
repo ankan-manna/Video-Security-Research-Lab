@@ -8,6 +8,7 @@ import { browserRoutes } from "./routes/browser.js";
 import { observationRoutes } from "./routes/observation.js";
 import { sessionRoutes } from "./routes/session.js";
 import { evidenceRoutes } from "./routes/evidence.js";
+import { securityRoutes } from "./routes/security.js";
 
 export interface BuiltApp {
   app: FastifyInstance;
@@ -28,6 +29,7 @@ export async function buildApp(env: Env, logger?: FastifyBaseLogger | boolean): 
   await app.register((instance) => observationRoutes(instance, service));
   await app.register((instance) => sessionRoutes(instance, service));
   await app.register((instance) => evidenceRoutes(instance, service));
+  await app.register((instance) => securityRoutes(instance, service));
 
   app.addHook("onClose", async () => {
     await service.shutdown();

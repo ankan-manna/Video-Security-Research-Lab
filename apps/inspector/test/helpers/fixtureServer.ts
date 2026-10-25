@@ -115,7 +115,28 @@ export function startFixtureServer(): Promise<FixtureServerHandle> {
       return;
     }
 
-    if (url.pathname.startsWith("/segment-")) {
+    if (/^\/segment-\d{3}\.ts$/.test(url.pathname)) {
+      // Exact-match only (not a loose prefix) — a mutated/malformed variant of one of these exact
+      // paths (see security/tests/resourceValidation.ts) deliberately falls through to the 404
+      // catch-all below, the way a real target's router would reject an unrecognized path.
+      res.writeHead(200, { "content-type": "video/mp2t" });
+      res.end(Buffer.from([0x47, 0x00, 0x00, 0x10]));
+      return;
+    }
+
+    if (url.pathname === "/auth-required-segment.ts") {
+      // Always denies, regardless of any header — simulates a target that correctly enforces
+      // authentication on a protected media resource. Used by the Prompt 3 security-test fixtures
+      // to exercise the "unauthenticated request is correctly denied" (pass) path.
+      res.writeHead(401, { "content-type": "application/json" });
+      res.end(JSON.stringify({ error: "unauthenticated" }));
+      return;
+    }
+
+    if (url.pathname.startsWith("/loose/")) {
+      // Always serves 200 for anything under this prefix, including an obviously malformed or
+      // mutated suffix — simulates a target with insufficient resource-identifier validation. Used
+      // to exercise the "fail" path of the resource/identifier-validation security test.
       res.writeHead(200, { "content-type": "video/mp2t" });
       res.end(Buffer.from([0x47, 0x00, 0x00, 0x10]));
       return;
