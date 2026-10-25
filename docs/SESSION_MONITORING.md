@@ -26,6 +26,22 @@ operator's browser session, and exactly what it does and does not treat as proof
 > evidence — see docs/SECURITY_MODEL.md's "The security-test engine." This interpretation is
 > recorded here explicitly, as a judgment call, rather than silently assumed.
 
+> **Prompt 4 note**: this module's transition logic is unchanged a third time; this stage's audit
+> re-confirmed, rather than re-designed, that it already does what the integration prompt asked
+> for ("reliable browser lifecycle handling," "clear authentication-state transitions,"
+> "event-driven updates," "configurable, bounded polling," "appropriate pause behavior," "recovery
+> after disconnection," "no secret exposure" — see docs/SECURITY_MODEL.md's "Session monitoring"
+> and "Network observation and redaction" sections for exactly how each is enforced in code). Two
+> concrete, additive changes came out of the audit: (1) a regression test confirming
+> `recordConnected()` resets cookie-name tracking on every launch, so a persistent browser
+> profile's pre-existing cookies from a prior session can never be mistaken for a same-session
+> "change" signal on relaunch — the behavior already existed (`this.lastCookieNames = new Set()`),
+> it simply had no direct test before now; (2) the dashboard's new Overview and Workflow panels
+> (`OverviewPanel.tsx`, `WorkflowPanel.tsx`) now surface this module's current state and
+> `pausedForReauthentication` flag more prominently — e.g. the Workflow panel shows an inline
+> reauthentication-required banner — but they read `GET /api/session` exactly as
+> `SessionMonitorPanel.tsx` already did; no new session-related endpoint was added.
+
 ## The six states
 
 | State | What it means | How it's reached |

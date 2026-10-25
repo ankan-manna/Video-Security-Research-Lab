@@ -12,13 +12,19 @@ import { SessionMonitorPanel } from "@/components/SessionMonitorPanel";
 import { NetworkObservationPanel } from "@/components/NetworkObservationPanel";
 import { EvidenceInventoryPanel } from "@/components/EvidenceInventoryPanel";
 import { SecurityTestingPanel } from "@/components/SecurityTestingPanel";
+import { OverviewPanel } from "@/components/OverviewPanel";
+import { WorkflowPanel } from "@/components/WorkflowPanel";
+import { ReportPanel } from "@/components/ReportPanel";
 
 const NAV_SECTIONS = [
+  { id: "overview", label: "Overview" },
+  { id: "workflow", label: "Workflow" },
   { id: "target", label: "Target Configuration" },
   { id: "browser", label: "Browser & Session" },
   { id: "network", label: "Network Observation" },
   { id: "evidence", label: "Evidence" },
   { id: "security-tests", label: "Security Tests" },
+  { id: "report", label: "Report" },
   { id: "research", label: "Research Workspace" },
 ];
 
@@ -49,6 +55,7 @@ function SectionHeading({ children }: { children: React.ReactNode }) {
 export default function DashboardPage() {
   const [historyRefreshKey, setHistoryRefreshKey] = useState(0);
   const [evidenceRefreshKey, setEvidenceRefreshKey] = useState(0);
+  const [reportExported, setReportExported] = useState(false);
 
   const bumpEvidence = () => setEvidenceRefreshKey((key) => key + 1);
 
@@ -72,7 +79,17 @@ export default function DashboardPage() {
 
       <NavBar />
 
-      <section id="target" className="scroll-mt-16">
+      <section id="overview" className="scroll-mt-16">
+        <SectionHeading>Overview</SectionHeading>
+        <OverviewPanel refreshKey={evidenceRefreshKey} />
+      </section>
+
+      <section id="workflow" className="mt-10 scroll-mt-16">
+        <SectionHeading>Guided Workflow</SectionHeading>
+        <WorkflowPanel reportExportedThisSession={reportExported} />
+      </section>
+
+      <section id="target" className="mt-10 scroll-mt-16">
         <SectionHeading>Target Configuration</SectionHeading>
         <TargetConfigPanel />
       </section>
@@ -98,6 +115,11 @@ export default function DashboardPage() {
       <section id="security-tests" className="mt-10 scroll-mt-16">
         <SectionHeading>Target-Based Authorization &amp; Session Security Test Engine</SectionHeading>
         <SecurityTestingPanel />
+      </section>
+
+      <section id="report" className="mt-10 scroll-mt-16">
+        <SectionHeading>Security Report</SectionHeading>
+        <ReportPanel onExported={() => setReportExported(true)} />
       </section>
 
       <section id="research" className="mt-10 scroll-mt-16">

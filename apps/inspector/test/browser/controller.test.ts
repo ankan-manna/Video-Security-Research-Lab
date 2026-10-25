@@ -100,4 +100,15 @@ describe("BrowserController", () => {
     // is the structural guarantee the separation requirement is about.
     expect(entries.length).toBeGreaterThan(0);
   }, 30_000);
+
+  it.skipIf(process.platform === "win32")(
+    "restricts the profile directory to the owner only, since it holds real cookies/local-storage",
+    async () => {
+      controller = new BrowserController({ profileDir, headless: true });
+      await controller.launch();
+      const stat = await fs.stat(profileDir);
+      expect(stat.mode & 0o777).toBe(0o700);
+    },
+    30_000,
+  );
 });

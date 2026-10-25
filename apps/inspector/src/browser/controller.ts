@@ -1,4 +1,5 @@
 import { EventEmitter } from "node:events";
+import { promises as fs } from "node:fs";
 import { chromium, type BrowserContext, type Page } from "playwright";
 
 export interface BrowserControllerOptions {
@@ -41,6 +42,14 @@ export class BrowserController extends EventEmitter {
 
   async launch(): Promise<BrowserStatus> {
     if (this.context) return this.status();
+
+    // Restrict the profile directory to the owner only before Playwright ever writes real
+    // cookies/local-storage into it — on a shared/multi-user machine, default directory
+    // permissions would otherwise let another local account read them. Best-effort: chmod has
+    // limited meaning on Windows, but calling it there is harmless. Explicit mkdir (rather than
+    // relying on Playwright's own) is what lets this run *before* anything is written.
+    await fs.mkdir(this.options.profileDir, { recursive: true, mode: 0o700 });
+    await fs.chmod(this.options.profileDir, 0o700).catch(() => {});
 
     const context = await chromium.launchPersistentContext(this.options.profileDir, {
       headless: this.options.headless ?? false,

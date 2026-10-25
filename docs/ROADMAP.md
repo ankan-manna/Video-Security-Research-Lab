@@ -129,7 +129,7 @@ change), then extended the existing modules rather than replacing them:
   not by adding a second, JS-injected signal source. Noted as a real option for a future prompt if
   finer-grained playback confirmation becomes necessary, not assumed necessary now. Still not built.
 
-## Prompt 3 — Target-based authorization and session security test engine ✅ (this stage)
+## Prompt 3 — Target-based authorization and session security test engine ✅
 
 Audited Prompts 1 and 2's actual implementation first (target scope, captured-request shape,
 observed URLs/responses, session-state signals) before writing anything, per the explicit "inspect
@@ -197,25 +197,104 @@ existing observation pipeline:
   production data). Reported separately from the fixture-based automated results above, per the
   explicit "report live-target integration results separately" instruction.
 
-### Not built in Prompt 3 (explicitly out of scope — "Prompt 3 only")
+### Not built in Prompt 3 (explicitly out of scope at the time — see Prompt 4 below for what closed this)
 
 - A blanket rule pausing every test category while `SessionMonitor.shouldPauseTests()` is true —
   deliberately not added; see docs/SESSION_MONITORING.md's Prompt 3 note for why (it would block
   category B exactly when it's most relevant, and categories D/E don't depend on this tool's
-  tracked session being valid at all).
-- A unified report spanning observation + analysis + security-test results in one document — each
-  is available via its own API/export today, not yet combined into one artifact.
+  tracked session being valid at all). Still not added in Prompt 4, same reasoning.
+- ~~A unified report spanning observation + analysis + security-test results in one document~~ —
+  closed in Prompt 4 (the security report generator).
 - Any UI/flow that names "G1"/"G2" as roles — this tool still has no concept of synthetic accounts;
-  "G2" in these docs describes the user's own test setup, not something this tool models.
+  "G2" in these docs describes the user's own test setup, not something this tool models. Still
+  true in Prompt 4.
+
+## Prompt 4 — Unified dashboard, guided workflow, and reporting ✅ (this stage)
+
+Audited Prompts 1–3's actual implementation first — full test suite re-run (298/298 passing before
+any change across all five workspaces), plus targeted code review of redaction, origin/rate-limit
+enforcement, and browser lifecycle handling (see "Audit findings" below) — before adding any new
+UI, per the explicit "fix integration issues before adding new UI features" instruction.
+
+- **Audit findings, fixed before new UI work**:
+  - Both `apps/api` and `apps/inspector` bound to `0.0.0.0` by default — on top of "no
+    authentication on the local API" (an accepted, documented tradeoff for a single-operator tool),
+    this made both services reachable from anywhere on the local network, not just the operator's
+    own machine. Fixed: both now default to `HOST=127.0.0.1`, overridable via env for an operator
+    who genuinely needs LAN/container access and accepts the tradeoff explicitly.
+  - The Playwright browser-profile directory (real cookies/local-storage) and
+    `INSPECTOR_DATA_DIR` were created with default OS directory permissions — on a shared machine,
+    another local account could potentially read them. Fixed: both are now explicitly restricted to
+    the owner (`chmod 0700`) at creation time, regression-tested.
+  - "Precondition validation" in the Security Test Workspace was descriptive text only, not a live
+    indicator — `GET /api/security/tests/:id/preconditions` is new, reusing the runner's actual
+    gating logic (target-config-saved + required-session-state checks), surfaced as a real
+    traffic-light status rather than only prose.
+  - `docs/PRESENTATION_GUIDE.md` was a fully obsolete operational guide for the deleted mock-lab
+    platform (wrong commands, a "Guided Demo" feature that no longer exists, a four-workspace
+    architecture diagram that stopped being true in Prompt 1) — removed.
+  - Everything else audited (manual-only auth, real-event-driven capture, end-to-end header/cookie
+    redaction, scope/rate-limit enforcement in the security-test engine, SSRF guarding in
+    `safeFetch`, browser disconnect/restart handling) was confirmed working as documented via the
+    existing real-browser and real-secret-value tests — no other defects found.
+- **Overview view** (`apps/web/components/OverviewPanel.tsx`): browser/session/capture status,
+  current target and video URL, total observed requests, manifest/segment counts, security tests
+  grouped by outcome, and the five most recent findings — every number read live from the same
+  endpoints the other panels already use; unconfigured/empty state is always labeled as such
+  ("not configured", "no capture yet"), never shown as a misleadingly bare zero.
+- **Guided workflow** (`apps/web/components/WorkflowPanel.tsx`): the 9-step workflow (configure →
+  launch → sign in → play → capture → inspect → test → review → export), each step's checkmark
+  computed from real derived state, not a static checklist. Surfaces a reauthentication-required
+  banner inline when `SessionMonitor` reports it.
+- **Security report generator** (`apps/inspector/src/report/`): `buildSecurityReport()` assembles
+  target/scope, browser/session observations, a traffic+manifest summary (plus a bounded 25-request
+  sample — full traffic has its own JSON/CSV export already), and the security-test assessment,
+  splitting findings into **confirmed** (high confidence) and **potential** (low/medium confidence)
+  buckets, with **inconclusive**/**passed**/**skipped** results reported separately — never folded
+  into a finding. Every report carries an explicit disclaimer that a passing run is not a security
+  certification. Generated fresh from already-redacted in-memory state on every request — nothing
+  is persisted, so there is no new "stored reports" surface to protect access to.
+  `renderReportHtml()` escapes every interpolated value (`escapeHtml()`), regression-tested against
+  an actual `<script>`/`onerror=` payload in a finding field. `GET /api/report?format=json|html`.
+- **Dashboard**: `ReportPanel.tsx` (preview + JSON/HTML/CSV export buttons) and both new panels
+  wired into `app/page.tsx` with new nav entries ("Overview", "Workflow", "Report").
+- **Hardening regression tests**: `HOST` default (both services), profile/data-directory
+  permissions, the new preconditions endpoint, and a `SessionMonitor.recordConnected()` reset test
+  (a persistent profile's pre-existing cookies never count as a same-session "change" signal after
+  a relaunch).
+- **Tests**: 298 passing across all five workspaces (manifest 13, security 45, api 44, inspector
+  196 — up from 277 after Prompt 3), including 10 new report-module tests (one driving a real
+  headless browser with a real secret header, confirming it never appears in either export format)
+  and the hardening regression tests above.
+- **Live-target integration**: **not exercised.** This environment has no network path to the
+  user's real, already-deployed target — every verification in this stage (including the live UI
+  smoke-tests of the new Overview/Workflow/Report panels) ran against either the local synthetic
+  fixture server or a locally-running instance of this repo's own `apps/api`, used purely as a
+  convenient, already-running local HTTP target for exercising the target-configuration flow end to
+  end. No claim is made that the full documented workflow has been run against a real external
+  target — see the final integration summary for exactly what remains to verify that way.
+
+### Not built in Prompt 4 (explicitly out of scope — "this integration pass only")
+
+- A blanket session-state pause gate for the whole test runner — still deliberately not added; see
+  above.
+- Persisted report history (list of previously-generated reports) — reports are generated on
+  demand only; there is nothing to list.
+- Live verification against the user's actual deployed REA clone — this environment cannot reach
+  it; see "Live-target integration" above.
+- A standalone ESLint setup for the backend workspaces — `next build`'s own built-in lint already
+  covers `apps/web`; adding a new linter across the rest of the monorepo is a tooling-wide decision
+  out of scope for an integration pass.
 
 ## Likely future prompts (not started, not designed in detail yet)
 
-- **A final integration module** (per the user's own closing instruction on Prompt 3): tying the
-  observation (Prompt 2), analysis, and security-test (Prompt 3) stages together into one coherent
-  workflow and exportable report, and exercising the whole pipeline against the user's actual
-  deployed target rather than only local fixtures.
+- Running the full documented workflow against the user's real deployed target once this
+  environment (or the operator's own machine) has network access to it, and recording the actual
+  results — the one verification step this stage could not perform.
 - Possibly: a second concurrent browser profile to compare two sessions (e.g. owner vs. member)
   side by side, if that turns out to be more useful than sequential manual sign-ins.
+- Possibly: persisted report history, if a single point-in-time export per session turns out to be
+  insufficient in practice.
 
 ## Explicit non-goals (every stage)
 

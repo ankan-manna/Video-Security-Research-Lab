@@ -2,6 +2,11 @@ import { z } from "zod";
 
 const envSchema = z.object({
   INSPECTOR_PORT: z.coerce.number().int().positive().default(4002),
+  // Loopback-only by default: this service has no authentication of its own (acceptable for a
+  // local, single-operator tool — see docs/SECURITY_MODEL.md), and it can launch a real browser
+  // and run security tests against a real target, so it must not be reachable from the rest of the
+  // local network unless the operator explicitly opts in (e.g. a container/VM setup).
+  HOST: z.string().default("127.0.0.1"),
   NODE_ENV: z.enum(["development", "test", "production"]).default("development"),
   DASHBOARD_ORIGIN: z.string().default("http://localhost:3000"),
 

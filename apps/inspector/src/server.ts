@@ -18,8 +18,8 @@ async function main() {
   }
 
   try {
-    await app.listen({ port: env.INSPECTOR_PORT, host: "0.0.0.0" });
-    logger.info(`Inspector listening on http://localhost:${env.INSPECTOR_PORT}`);
+    await app.listen({ port: env.INSPECTOR_PORT, host: env.HOST });
+    logger.info(`Inspector listening on http://${env.HOST}:${env.INSPECTOR_PORT}`);
   } catch (error) {
     logger.error(error, "Failed to start inspector server");
     process.exit(1);

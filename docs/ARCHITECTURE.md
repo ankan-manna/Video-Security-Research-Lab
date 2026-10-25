@@ -30,7 +30,8 @@ mock-video-platform direction, and exactly what was kept/moved/removed and why, 
 │  │                  e.g. importing a HAR exported from DevTools)
 │  └─ inspector/    Fastify service — target config, Playwright browser controller, session
 │                     lifecycle monitor, network observation, video-chunk/evidence analysis,
-│                     and a controlled security-test engine (src/security/, Prompt 3).
+│                     a controlled security-test engine (src/security/, Prompt 3), and a
+│                     generated-on-demand security report (src/report/, Prompt 4).
 │                     The actual security-testing tool.
 ├─ packages/
 │  ├─ security/     Shared SSRF/URL-safety guard, IP-pinned safeFetch, and redaction
@@ -57,6 +58,12 @@ are imported as normal `@research-lab/*` packages, no publishing step.
 - **JSON-file storage with atomic writes**, same pattern as `apps/api`. See "A real concurrency
   bug" in [SECURITY_MODEL.md](SECURITY_MODEL.md) for why atomic (temp-file + rename) writes matter
   here specifically.
+- **Loopback-only (`127.0.0.1`) by default, for both `apps/api` and `apps/inspector`.** Neither
+  service authenticates its own API (an accepted, documented tradeoff for a local, single-operator
+  tool — see SECURITY_MODEL.md), so binding to every network interface by default would have
+  widened that from "anyone on this machine" to "anyone on the same network." Override via the
+  `HOST` env var only if you specifically need that and accept the tradeoff (e.g. a container/VM
+  setup where the dashboard runs elsewhere).
 
 ## Request flow
 
@@ -169,6 +176,29 @@ Five built-in `TestDefinition`s (`src/security/tests/`), registered once at star
   reimplemented) — which attaches no cookies or Authorization header, so every request this engine
   sends is genuinely unauthenticated by construction.
 
+### Security report (Prompt 4)
+
+```
+GET /api/report?format=json|html
+  → buildSecurityReport(service)                        — src/report/build.ts
+      reads (never re-fetches, never re-derives from a raw source):
+        TargetConfigStore.load(), BrowserController.status(), SessionMonitor.snapshot(),
+        EvidenceStore.getEvents()/getManifests()/getSegmentInventory(),
+        SecurityTestStore.getResults()/getFindings()
+      → findings split by confidence: "high" → confirmedFindings, "low"/"medium" → potentialFindings
+      → results split by outcome: passedChecks / skippedChecks / inconclusiveResults
+      → a fixed disclaimer: a passing run is not a security certification
+  → format=json  → the report object, sent as a downloadable attachment
+  → format=html  → renderReportHtml(report) (src/report/render.ts) — escapeHtml() on every
+                    interpolated value, regression-tested against an actual script-injection payload
+```
+
+Generated fresh on every request from already-redacted in-memory state — there is no
+`reports.json`, no report history, and therefore no new "stored report" surface to control access
+to. The dashboard's `ReportPanel.tsx` fetches one JSON preview to show live counts, then links
+directly to the generating endpoint for the actual JSON/HTML download (same pattern as the traffic
+timeline's existing JSON/CSV export links).
+
 ## Module boundaries and reuse
 
 - `packages/security` owns every SSRF/origin/redaction decision shared across apps. `apps/api`'s
@@ -184,9 +214,12 @@ Five built-in `TestDefinition`s (`src/security/tests/`), registered once at star
   manifest-parse-failure surfacing, segment/manifest linking, coverage reporting, capture-session
   grouping, JSON/CSV export, persistence), `security/` (Prompt 3: test types, rate limiter, scoped
   fetch, runner, findings, persistence, and `security/tests/` — the five test-category
-  implementations). `service.ts` is the one place these are wired together (including generating
-  and threading the per-launch `sessionId`, and registering the security-test catalog);
-  `routes/*.ts` are thin Fastify handlers over `InspectorService`.
+  implementations), `report/` (Prompt 4: `build.ts` assembles a `SecurityReport` purely by reading
+  the other modules' already-redacted state, `render.ts` renders it to escaped HTML — neither
+  module fetches anything or holds its own state). `service.ts` is the one place these are wired
+  together (including generating and threading the per-launch `sessionId`, registering the
+  security-test catalog, and restricting `INSPECTOR_DATA_DIR`'s permissions at init); `routes/*.ts`
+  are thin Fastify handlers over `InspectorService`.
 - `src/lib/jsonStore.ts` holds the atomic-write / tolerant-read JSON helpers (`atomicWriteJson`,
   `readJsonArray`) that originated inline in `evidence/store.ts` during Prompt 2 and were extracted
   here in Prompt 3 specifically so `security/store.ts` reuses the identical persistence guarantees
@@ -197,11 +230,16 @@ Five built-in `TestDefinition`s (`src/security/tests/`), registered once at star
   start/pause/resume labeling), `SessionMonitorPanel`, `NetworkObservationPanel` (rewritten in
   Prompt 2 into the full live traffic timeline with filters, expandable request details, and
   export links), `EvidenceInventoryPanel` (rewritten in Prompt 2 with HLS/DASH structure detail,
-  manifest-parse-failures, capture-sessions, and a filterable segment inventory), and
+  manifest-parse-failures, capture-sessions, and a filterable segment inventory),
   `SecurityTestingPanel` (Prompt 3: catalog, confirmation gating, execution history with an
-  evidence viewer, findings/remediation, global stop) are the panels this stage's three prompts
-  added; `UrlForm`/`AnalysisHistory`/`HarUpload`/`ManifestInspector` are unchanged clients of
-  `apps/api`.
+  evidence viewer, findings/remediation, global stop), and `OverviewPanel`/`WorkflowPanel`/
+  `ReportPanel` (Prompt 4: a live aggregated summary, a derived-state 9-step guided workflow, and a
+  report preview + JSON/HTML/CSV export) are the panels built across these four prompts;
+  `UrlForm`/`AnalysisHistory`/`HarUpload`/`ManifestInspector` are unchanged clients of `apps/api`.
+  Every new Prompt 4 panel computes its own aggregates (counts, grouping, step-completion) purely
+  from data the inspector's existing endpoints already return — no new backend aggregation endpoint
+  was needed for the Overview or Workflow views specifically (only the report, which genuinely
+  combines state no single existing endpoint already returns together).
 
 ## Two deliberate non-restrictions, both documented at their source
 
@@ -232,6 +270,10 @@ Five built-in `TestDefinition`s (`src/security/tests/`), registered once at star
 - Replaying a captured *authenticated* request to test expired/revoked-session denial directly —
   the security-test engine never does this (see SECURITY_MODEL.md); tests B and C instead reason
   from the real browser's own session signals and newly-observed traffic.
-- A unified, exportable report spanning observation + analysis + security-test results in one
-  document — each is available via its own API/export today, not yet combined. See
-  [ROADMAP.md](ROADMAP.md)'s "Likely future prompts."
+- A blanket rule pausing every security-test category while `SessionMonitor.shouldPauseTests()` is
+  true — deliberately not added; see [SESSION_MONITORING.md](SESSION_MONITORING.md)'s Prompt 3 note.
+- Persisted report history — `GET /api/report` always generates fresh from current state; there is
+  no list of previously-generated reports to browse.
+- Verification of the full documented workflow against the user's actual, real deployed target —
+  this environment has no network path to it. See [ROADMAP.md](ROADMAP.md)'s Prompt 4 section for
+  exactly what was and wasn't verified, and against what.

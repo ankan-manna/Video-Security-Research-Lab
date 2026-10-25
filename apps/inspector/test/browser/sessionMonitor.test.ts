@@ -18,6 +18,23 @@ describe("SessionMonitor state transitions", () => {
     expect(snap.state).toBe("browser_connected");
   });
 
+  it("recordConnected() resets cookie-name tracking, so a persistent profile's pre-existing cookies never count as a 'change' signal on relaunch", () => {
+    const monitor = new SessionMonitor();
+    monitor.recordConnected();
+    monitor.recordCookieNames(["session_id"]); // first signal -> session_appears_authenticated
+    expect(monitor.snapshot().state).toBe("session_appears_authenticated");
+
+    // Simulate a relaunch against the same persistent browser profile: recordConnected() must not
+    // assume the profile's existing cookies mean anything about *this* new session's validity.
+    monitor.recordConnected();
+    expect(monitor.snapshot().state).toBe("browser_connected");
+
+    // The same cookie name the (reset) monitor hasn't "seen" yet in this session still counts as
+    // a change, not something already accounted for from before the reset.
+    monitor.recordCookieNames(["session_id"]);
+    expect(monitor.snapshot().state).toBe("session_appears_authenticated");
+  });
+
   it("a 401 with no prior authenticated signal goes straight to reauthentication_required", () => {
     const monitor = new SessionMonitor();
     monitor.recordConnected();

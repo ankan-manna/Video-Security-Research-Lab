@@ -67,6 +67,25 @@ operator's manual sign-in produces. This directory:
 - Is read by nothing in this codebase except Playwright itself. `BrowserController` exposes only
   `status()` (connection state + current URL) and `getPage()` (so other modules can attach their
   own listeners) — never a method that reads profile contents.
+- **Restricted to the owner only (`chmod 0700`), set explicitly by `BrowserController.launch()`
+  before Playwright ever writes into it.** Added in Prompt 4 after an audit found the directory was
+  previously created with whatever the OS default happened to be — on a shared/multi-user machine,
+  that could let another local account read real cookies/local-storage out of it. Best-effort
+  (chmod has limited meaning on Windows); regression-tested in
+  `test/browser/controller.test.ts`. `InspectorService.init()` applies the same restriction to
+  `INSPECTOR_DATA_DIR` — defense in depth, even though everything written there is already redacted
+  before it's persisted.
+
+## Network binding (`apps/inspector/src/server.ts`, `apps/api/src/server.ts`)
+
+Both services bind to `127.0.0.1` by default (`HOST` env var, Prompt 4) rather than `0.0.0.0`.
+Neither service authenticates its own HTTP API — an accepted, documented tradeoff for a local,
+single-operator tool (see "Threats explicitly out of scope" below) — so binding to every network
+interface by default would have silently widened that from "anyone with access to this machine" to
+"anyone on the same local network," for a tool that can launch a real browser, hold a real signed-in
+session, and run security tests against a real target. An operator who genuinely needs broader
+reachability (e.g. a container/VM setup where the dashboard runs elsewhere) can opt in explicitly
+via `HOST=0.0.0.0`; regression-tested in both services' `env.test.ts`.
 
 ## Session monitoring
 
@@ -179,6 +198,39 @@ there is no second place a redaction rule would need to be kept in sync. CSV out
 nested request/response header lists (full header detail is JSON-only); both formats set
 `Content-Disposition: attachment` so a browser downloads rather than renders the response.
 
+## Security report (`apps/inspector/src/report/`, Prompt 4)
+
+`buildSecurityReport()` assembles its output entirely from already-redacted in-memory state —
+`EvidenceStore`, `SessionMonitor`, `SecurityTestStore`, `TargetConfigStore` — the same sources
+`GET /api/evidence/*` and `GET /api/security/*` already expose individually. It performs no fetch
+of its own and introduces no second redaction rule to keep in sync with the ones already applied at
+capture time (see "Header redaction" and "A real redaction gap this caught" above); regression-
+tested in `test/app.report.test.ts` by driving a real browser through a request carrying a real
+`Authorization: Bearer <value>` header and asserting the value never appears in either export
+format.
+
+**Not persisted.** `GET /api/report` generates a fresh report on every call; there is no
+`reports.json` and no report history. This was a deliberate choice, not an oversight: it means
+there is no new "stored reports" surface for this section's "Access to stored reports and captures"
+hardening concern to address — the report is exactly as reachable, and no more, as the live data it
+summarizes already was.
+
+**HTML output is escaped, not merely redacted.** Redaction removes *secrets* (cookies, tokens,
+sensitive query parameters); it says nothing about whether a value is safe to drop into HTML
+unescaped. A target's URL or a finding's text could in principle contain `<`/`&`/`"` characters that
+survive redaction untouched. `render.ts`'s `escapeHtml()` runs on every single interpolated value in
+the generated document — regression-tested in `test/report/render.test.ts` with an actual
+`<script>`/`onerror=` payload injected into a sample request URL and a finding's title, asserting
+neither appears as executable markup in the output, only as escaped text.
+
+**Never claims security from a passing run.** Every generated report carries a fixed disclaimer
+stating that a passing test run is not a certification that the target is secure, and that
+`inconclusive`/`skipped` results mean the tool couldn't safely determine an answer — not that the
+underlying condition is fine. Findings are split into **confirmed** (high-confidence) and
+**potential** (low/medium-confidence) buckets using the same confidence computed in
+`security/findings.ts` (see "The security-test engine" below) — the report never upgrades a
+finding's confidence, it only buckets by the value already computed.
+
 ## Input validation
 
 Every HTTP request body in `apps/inspector` is validated with Zod (`targetConfigInputSchema`,
@@ -257,9 +309,12 @@ over HTTP — only code already running in this same process can reassign it.
   browser has no competing tenants to protect from each other — revisit if that assumption changes.
   (The security-test engine's *outbound* requests to the target are rate-limited — see above; this
   bullet is about the inspector's own inbound API.)
-- **No authentication on the dashboard or inspector API itself.** Anyone who can reach
-  `localhost:3000`/`:4002` can use this tool — acceptable for a local research tool, would need
-  revisiting before any shared/networked deployment.
+- **No authentication on the dashboard or inspector API itself.** Anyone who can reach it can use
+  this tool. Since Prompt 4, "reach it" means the operator's own machine by default (`HOST`
+  defaults to `127.0.0.1` for both `apps/api` and `apps/inspector` — see "Network binding" above),
+  narrower than the prior "anyone on the network" exposure that default binding to `0.0.0.0` would
+  have created. Still acceptable for a local research tool, would need revisiting before any
+  shared/networked deployment (i.e. before anyone opts into a wider `HOST`).
 - **No media-element-level playback confirmation.** An HTTP 200 is reported as exactly that — a
   response was received — never as proof the segment was decoded or played. This is enforced by
   never claiming the stronger fact anywhere in code, UI copy, or export output, not by instrumenting

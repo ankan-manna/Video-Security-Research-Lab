@@ -11,8 +11,8 @@ async function main() {
   const app = await buildApp(env, logger as never);
 
   try {
-    await app.listen({ port: env.API_PORT, host: "0.0.0.0" });
-    logger.info(`API listening on http://localhost:${env.API_PORT}`);
+    await app.listen({ port: env.API_PORT, host: env.HOST });
+    logger.info(`API listening on http://${env.HOST}:${env.API_PORT}`);
   } catch (error) {
     logger.error(error, "Failed to start API server");
     process.exit(1);

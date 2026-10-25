@@ -1,8 +1,20 @@
 import { randomUUID } from "node:crypto";
 import type { InspectorService } from "../service.js";
+import type { SessionState } from "../browser/sessionMonitor.js";
 import { buildFinding } from "./findings.js";
 import type { SecurityTestStore } from "./store.js";
 import type { TestDefinition, TestResult, TestRunOutcome } from "./types.js";
+
+/** Read-only, pre-flight view of whether a test's *mechanically checkable* preconditions are met right now — used by the dashboard to show a live "ready to run" indicator rather than only descriptive text. Free-text preconditions (e.g. "the video was played at least once") aren't included here since this tool can't verify them generically — see `reason` for exactly what was checked. */
+export interface PreconditionEvaluation {
+  testId: string;
+  targetConfigured: boolean;
+  requiresConfirmation: boolean;
+  requiredAuthState: SessionState[] | null;
+  currentAuthState: SessionState | null;
+  met: boolean;
+  reason: string | null;
+}
 
 export type RunRejection =
   | { ok: false; reason: "unknown_test"; message: string }
@@ -65,6 +77,39 @@ export class SecurityTestRunner {
   /** Aborts whatever is currently in flight. A no-op if nothing is running. */
   requestStop(): void {
     this.currentAbort?.abort();
+  }
+
+  /** Evaluates (without running anything) whether a test's structurally-enforced preconditions — a saved target config, and a matching session state if the test declares one — are currently met. Returns `null` for an unknown test id. */
+  async evaluatePreconditions(testId: string): Promise<PreconditionEvaluation | null> {
+    const definition = this.definitions.get(testId);
+    if (!definition) return null;
+
+    const config = await this.service.targetConfigStore.load();
+    const currentAuthState = this.service.sessionMonitor.snapshot().state;
+    const targetConfigured = config !== null;
+
+    if (!targetConfigured) {
+      return {
+        testId,
+        targetConfigured,
+        requiresConfirmation: definition.requiresConfirmation,
+        requiredAuthState: definition.requiredAuthState,
+        currentAuthState,
+        met: false,
+        reason: "No target configuration is saved yet.",
+      };
+    }
+
+    const authReason = this.unmetPreconditionReason(definition);
+    return {
+      testId,
+      targetConfigured,
+      requiresConfirmation: definition.requiresConfirmation,
+      requiredAuthState: definition.requiredAuthState,
+      currentAuthState,
+      met: authReason === null,
+      reason: authReason,
+    };
   }
 
   async run(testId: string, input: Record<string, unknown>): Promise<RunResponse> {

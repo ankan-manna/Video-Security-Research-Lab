@@ -27,6 +27,15 @@ export async function securityRoutes(app: FastifyInstance, service: InspectorSer
     tests: service.securityTestRunner.catalog().map(catalogEntry),
   }));
 
+  app.get("/api/security/tests/:id/preconditions", async (request, reply) => {
+    const { id } = request.params as { id: string };
+    const evaluation = await service.securityTestRunner.evaluatePreconditions(id);
+    if (!evaluation) {
+      return reply.status(404).send({ error: "unknown_test", message: `No registered test with id "${id}".` });
+    }
+    return reply.send(evaluation);
+  });
+
   app.get("/api/security/status", async () => ({
     running: service.securityTestRunner.isRunning(),
     currentTestId: service.securityTestRunner.currentlyRunningTestId(),

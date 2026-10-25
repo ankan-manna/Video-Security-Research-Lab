@@ -1,5 +1,13 @@
 # Refactor Plan: From Mock Video Platform to Real-Target Security Testing Tool
 
+> **Historical record, not a living document.** This file captures the Prompt 1 migration
+> decision — moving off the standalone mock video platform the first five prompts built, onto
+> observing a real, already-deployed target — exactly as it was reasoned through at the time. It
+> is retained because it explains *why* the codebase looks the way it does, not as a description
+> of current functionality. For what the system actually does today, see
+> [ARCHITECTURE.md](ARCHITECTURE.md) and [SECURITY_MODEL.md](SECURITY_MODEL.md); for what's been
+> built since, prompt by prompt, see [ROADMAP.md](ROADMAP.md).
+
 This document records what was audited, what was wrong, and exactly what changed and why. It is
 written before the refactor begins and is the source of truth for the migration — if an
 implementation decision below turns out to be wrong once coded, this file gets updated, not

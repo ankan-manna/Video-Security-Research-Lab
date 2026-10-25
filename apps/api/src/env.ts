@@ -2,6 +2,10 @@ import { z } from "zod";
 
 const envSchema = z.object({
   API_PORT: z.coerce.number().int().positive().default(4001),
+  // Loopback-only by default: this API has no authentication of its own (acceptable for a local,
+  // single-operator tool — see docs/SECURITY_MODEL.md), so it must not be reachable from the rest
+  // of the local network unless the operator explicitly opts in (e.g. a container/VM setup).
+  HOST: z.string().default("127.0.0.1"),
   NODE_ENV: z.enum(["development", "test", "production"]).default("development"),
   ANALYSIS_ALLOWED_HOSTS: z
     .string()

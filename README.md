@@ -10,8 +10,17 @@ observes the sanitized network traffic your browser already produces.
 
 > This repository's first five prompts built a standalone mock video platform to test against —
 > that was the wrong target. See [docs/REFACTOR_PLAN.md](docs/REFACTOR_PLAN.md) for what changed
-> and why. The current tool starts fresh from **Prompt 1** of the corrected direction — see
-> [docs/ROADMAP.md](docs/ROADMAP.md).
+> and why (historical record). The current tool is the result of four further prompts building
+> the real-target observation, security-test, and reporting pipeline — see
+> [docs/ROADMAP.md](docs/ROADMAP.md) for what each one added.
+
+> **Live-target verification status.** Everything in this repository has been verified against
+> real local infrastructure — a real headless Chromium browser, a real local HTTP fixture server,
+> and (for UI smoke-testing) this repo's own locally-running `apps/api` used as a convenient
+> stand-in target. It has **not** been run end to end against a real, externally-deployed target
+> application, because no such environment is reachable from wherever this was built. Point it at
+> your own deployed app and run through [the workflow below](#running-the-services) to get that
+> verification yourself — nothing about the design assumes a local-only target.
 
 ## What this is not
 
@@ -34,8 +43,9 @@ apps/web        Next.js dashboard (dark/hacker-style UI)
 apps/api        Fastify backend: URL analysis, HAR import, manifest parsing (standalone analysis
                  utilities, independent of the inspector below)
 apps/inspector  Fastify service: target config, Playwright browser controller, session lifecycle
-                 monitor, network observation, video-chunk/evidence analysis, and a controlled
-                 security-test engine (src/security/) — the actual tool
+                 monitor, network observation, video-chunk/evidence analysis, a controlled
+                 security-test engine (src/security/), and a generated-on-demand security report
+                 (src/report/) — the actual tool
 packages/security  Shared SSRF/URL-safety guard, safeFetch, and redaction (header + URL query-param)
 packages/manifest  Shared HLS/DASH manifest parsers
 ```
@@ -70,19 +80,29 @@ npm run dev:web        # Next.js dashboard          -> http://localhost:3000
 
 Open `http://localhost:3000`. The dashboard sections, in order:
 
-1. **Target Configuration** — enter your target's base URL and a members-only video URL. The video
+1. **Overview** — a live, read-only summary: browser connection and session-authentication state,
+   current target/video URL, capture status, total observed requests, manifest/media-segment
+   counts, security tests grouped by outcome, and the five most recent findings. Every number is
+   read from the same stored state the other sections show in detail; an unconfigured/empty value
+   is always labeled as such ("not configured," "no capture yet"), never shown as a bare,
+   misleadingly-real-looking zero.
+2. **Guided Workflow** — the 9-step repeatable workflow this tool is built around (configure →
+   launch → sign in → play → capture → inspect → test → review → export). Each step's checkmark
+   reflects real derived state, not a static checklist — click a step to jump to the section that
+   completes it. Shows an inline banner if reauthentication is currently required.
+3. **Target Configuration** — enter your target's base URL and a members-only video URL. The video
    URL must belong to the target's own origin, or an origin you explicitly approve (e.g. a CDN) —
    this is validated and enforced, never assumed.
-2. **Browser Controller & Session Monitor** — click "launch browser." A real, visible Chromium
+4. **Browser Controller & Session Monitor** — click "launch browser." A real, visible Chromium
    window opens with its own dedicated profile. **Sign in manually, exactly as you would in any
    browser.** The Session Monitor shows six distinct authentication-state signals as they're
    observed — see [docs/SESSION_MONITORING.md](docs/SESSION_MONITORING.md) for exactly what each
    means and what is (and isn't) treated as proof of a valid session.
-3. **Browser Controller — capture** — optionally enter a duration (seconds) before clicking "start
+5. **Browser Controller — capture** — optionally enter a duration (seconds) before clicking "start
    capture," then browse/play video in the launched browser normally. "pause capture"/"resume
    capture" toggle recording without losing what's already captured; a duration auto-stops the
    capture without an explicit click.
-4. **Live Traffic Timeline** — every captured request appears here as it happens: timestamp,
+6. **Live Traffic Timeline** — every captured request appears here as it happens: timestamp,
    method, redacted URL, a classification badge (document/script/stylesheet/image/fetch-XHR/
    HLS manifest/DASH manifest/segment/init segment/other — `tentative` when only the URL extension
    supports it), status, content-type, size, timing. Filter by resource type (including a
@@ -92,7 +112,7 @@ Open `http://localhost:3000`. The dashboard sections, in order:
    traffic metadata — never raw cookies, tokens, or session identifiers. The panel states
    explicitly, next to every status code, that an HTTP 200 is not proof a segment was successfully
    decoded or played — only that the browser received a response.
-5. **Manifest Analysis & Segment Inventory** — manifests identified during playback, expandable into
+7. **Manifest Analysis & Segment Inventory** — manifests identified during playback, expandable into
    full HLS (variants, bandwidth, media segments, sequence numbers, encryption *detection* without
    ever retrieving a key) or DASH (periods, adaptation sets, representations, codecs, bandwidth,
    segment templates) structure. A manifest that's HLS/DASH-*shaped* by content-type but doesn't
@@ -101,19 +121,29 @@ Open `http://localhost:3000`. The dashboard sections, in order:
    failed-only) links each observed segment request to the manifest that declared it, with a
    coverage report comparing what the manifest declared against what the browser actually received
    (received / missing / failed). "Clear evidence" deletes everything this tool has recorded.
-6. **Target-Based Authorization & Session Security Test Engine** — a catalog of five controlled test
+8. **Target-Based Authorization & Session Security Test Engine** — a catalog of five controlled test
    categories (A–E, see [docs/SECURITY_MODEL.md](docs/SECURITY_MODEL.md)'s "Security-test engine"
    section for exactly what each one checks and how). Each card shows its objective, preconditions,
-   expected result, and required confirmation. Click "run test" to execute it against the actual
-   configured target — never a simulated one. The one state-changing test (membership revocation)
-   requires you to check an explicit confirmation box first, since its precondition is a real change
-   you make yourself in the target's own UI. "stop all tests" aborts whatever is currently running.
-   Results appear in a history table (click a row to expand its evidence); any `fail` outcome also
-   produces an entry in the Findings panel with remediation guidance. "clear results" deletes the
-   history and findings.
-7. **Research Workspace** — the standalone `apps/api` utilities: submit a URL for metadata analysis,
-   import a HAR capture exported from DevTools, or paste/fetch a manifest directly. Independent of
-   the inspector above; useful as a secondary, complementary analysis path.
+   expected result, and required confirmation, plus a live "ready to run" indicator
+   (`GET /api/security/tests/:id/preconditions`) — not just descriptive text. Click "run test" to
+   execute it against the actual configured target — never a simulated one. The one state-changing
+   test (membership revocation) requires you to check an explicit confirmation box first, since its
+   precondition is a real change you make yourself in the target's own UI. "stop all tests" aborts
+   whatever is currently running. Results appear in a history table (click a row to expand its
+   evidence); any `fail` outcome also produces an entry in the Findings panel with remediation
+   guidance. "clear results" deletes the history and findings.
+9. **Security Report** — a live preview (target, traffic/manifest counts, tests run, confirmed/
+   potential finding counts) of what an export would currently contain, generated fresh from
+   current state — nothing is stored separately. "export JSON"/"export HTML" download the full
+   report (target and authorized scope, environment/limitations, browser/session observations, a
+   bounded sample of recent requests plus manifest summaries, and the full security-test assessment
+   split into confirmed findings / potential findings / inconclusive results / passed / skipped,
+   each with remediation where applicable); "export traffic CSV" links to the existing full traffic
+   export. Every report carries an explicit disclaimer that a passing run is not a security
+   certification, and the HTML export escapes every value before embedding it.
+10. **Research Workspace** — the standalone `apps/api` utilities: submit a URL for metadata analysis,
+    import a HAR capture exported from DevTools, or paste/fetch a manifest directly. Independent of
+    the inspector above; useful as a secondary, complementary analysis path.
 
 ## Running tests
 
@@ -152,12 +182,14 @@ per-workspace test counts as of the current stage.
 | `GET` | `/api/evidence/export?format=json\|csv` | Downloads already-redacted traffic metadata as an attachment. Never includes raw cookies, Authorization headers, or tokens. |
 | `POST` | `/api/evidence/clear` | Deletes all captured evidence. |
 | `GET` | `/api/security/tests` | The security-test catalog — id, category, description, objective, preconditions, required session state, whether it requires confirmation. |
+| `GET` | `/api/security/tests/:id/preconditions` | Live check of that test's structurally-enforced preconditions (target saved, required session state) — `{met, reason, ...}`. `404` for an unknown test id. |
 | `GET` | `/api/security/status` | Whether a test is currently running, and which one. |
 | `POST` | `/api/security/tests/:id/run` | Runs one test against the actual configured target. Body: `{ confirmed?: boolean, phase?: "arm" \| "evaluate", ... }` — `confirmed: true` is required for a test whose catalog entry has `requiresConfirmation: true`; `phase` is used only by `membership-revocation`'s two-phase workflow. Responds `409` with `{error: "confirmation_required" \| "no_target_config" \| "already_running"}` or `404` with `{error: "unknown_test"}` when it can't run. |
 | `POST` | `/api/security/stop` | Aborts whatever test is currently running. Always responds `200`, even if nothing was running. |
 | `GET` | `/api/security/results` | Every past test execution (newest first) — expected/actual result, outcome, sanitized evidence, remediation, limitations. |
 | `GET` | `/api/security/findings` | Findings derived only from `fail` outcomes — never from pass/skipped/inconclusive. |
 | `POST` | `/api/security/results/clear` | Deletes all security-test results and findings. |
+| `GET` | `/api/report?format=json\|html` | Generates a sanitized security report fresh from current state (target/scope, browser/session observations, traffic+manifest summary, security-test assessment with confirmed/potential findings). Nothing is stored — every call regenerates it. |
 
 ### `apps/api` (unchanged analysis utilities)
 
@@ -177,18 +209,24 @@ Full request/response shapes and configuration: [docs/ARCHITECTURE.md](docs/ARCH
 ## Known limitations
 
 See [docs/SECURITY_MODEL.md](docs/SECURITY_MODEL.md)'s "Threats explicitly out of scope" and
-[docs/ROADMAP.md](docs/ROADMAP.md)'s "Not built in Prompt 3" for the full, honest list —
-summarized: no rate limiting or auth on the local services themselves (acceptable for a local,
-single-operator tool), no media-element-level playback confirmation (an HTTP 200 is explicitly
-never presented as proof of decode/playback), the login-detection heuristic in the session monitor
-is exactly that — a heuristic, no automated replay of a captured authenticated request (the
+[docs/ROADMAP.md](docs/ROADMAP.md)'s "Not built in Prompt 4" for the full, honest list —
+summarized: no rate limiting or authentication on the local services' own HTTP API (both now bind
+to `127.0.0.1` only by default, narrowing but not eliminating this — see "Network binding" in
+SECURITY_MODEL.md), no media-element-level playback confirmation (an HTTP 200 is explicitly never
+presented as proof of decode/playback), the login-detection heuristic in the session monitor is
+exactly that — a heuristic, no automated replay of a captured authenticated request (the
 direct-resource-authorization test only ever sends genuinely unauthenticated requests), no
-cross-account comparison (G1 vs. G2 side by side), and the security-test engine only samples a
-small, bounded set of already-observed resources — it never enumerates or guesses URLs the browser
-hasn't already produced.
+cross-account comparison (G1 vs. G2 side by side), the security-test engine only samples a small,
+bounded set of already-observed resources (it never enumerates or guesses URLs the browser hasn't
+already produced), no persisted report history (every report is generated fresh on demand), and —
+most importantly — **this tool has not been run end to end against a real, externally-deployed
+target from this environment**; every automated test and live UI check here ran against either a
+local synthetic fixture server or this repo's own locally-running `apps/api`, never a real
+production application. Running it against your actual target is the one remaining verification
+step, and the Guided Workflow panel is built to make that straightforward.
 
 ## Next step
 
-See [docs/ROADMAP.md](docs/ROADMAP.md) for what's likely to come next — a final integration pass
-tying the observation, analysis, and security-test stages together into one coherent workflow and
-report.
+See [docs/ROADMAP.md](docs/ROADMAP.md)'s "Likely future prompts" — chiefly, running the full
+documented workflow against the user's real deployed target and recording the actual results, which
+this environment could not do.

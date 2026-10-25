@@ -1,4 +1,5 @@
 import path from "node:path";
+import { promises as fs } from "node:fs";
 import { randomUUID } from "node:crypto";
 import { BrowserController } from "./browser/controller.js";
 import { SessionMonitor } from "./browser/sessionMonitor.js";
@@ -87,6 +88,13 @@ export class InspectorService {
   }
 
   async init(): Promise<void> {
+    // Restrict the data directory (target config, evidence, security-test results/findings,
+    // reports) to the owner only — defense in depth, even though everything written there is
+    // already redacted before it's persisted. Mirrors BrowserController's own profile-directory
+    // restriction. Best-effort: chmod has limited meaning on Windows.
+    await fs.mkdir(this.env.INSPECTOR_DATA_DIR, { recursive: true, mode: 0o700 });
+    await fs.chmod(this.env.INSPECTOR_DATA_DIR, 0o700).catch(() => {});
+
     await this.evidenceStore.load();
     await this.securityTestStore.load();
     const config = await this.targetConfigStore.load();
