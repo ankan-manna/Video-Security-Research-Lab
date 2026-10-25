@@ -1,45 +1,42 @@
-# Video Security Research Lab
+# Security Inspector
 
-A standalone, hacker-style security research application built for a college showcase. It
-analyzes video page URLs, inspects permitted HTTP metadata, studies streaming (HLS/DASH) formats,
-and demonstrates authentication, membership, and access-control security concepts — all against
-either a user-submitted capture or a local mock streaming lab, never by bypassing a real platform's
-protections.
+A browser-based security testing tool that observes authentication, manifest delivery, and
+media-segment access control on a **real, already-deployed target application** — your own video
+platform — via a visible, manually-driven browser session.
 
-**This project is independent of any YouTube clone.** It does not read, call, or depend on that
-repository's source, database, APIs, or infrastructure. It takes a video URL and permitted public
-data (page metadata, HTTP headers, user-supplied HAR files, publicly reachable manifests, and the
-user's own local test videos) as input.
+**This is not a second video platform.** It does not build, simulate, or host any video content of
+its own. It launches a real Chromium browser, lets you sign in and use your target normally, and
+observes the sanitized network traffic your browser already produces.
 
-> Stage: **Prompt 5 of 5 — final integration, hacker-style dashboard, and security showcase.
-> Complete.** See [docs/ROADMAP.md](docs/ROADMAP.md) for the full build plan, and
-> [docs/PRESENTATION_GUIDE.md](docs/PRESENTATION_GUIDE.md) for a ready-to-run college
-> demonstration script.
+> This repository's first five prompts built a standalone mock video platform to test against —
+> that was the wrong target. See [docs/REFACTOR_PLAN.md](docs/REFACTOR_PLAN.md) for what changed
+> and why. The current tool starts fresh from **Prompt 1** of the corrected direction — see
+> [docs/ROADMAP.md](docs/ROADMAP.md).
 
 ## What this is not
 
-- Not a tool for extracting or reconstructing protected (members-only, paywalled, DRM'd) video
-  content using authenticated session cookies.
-- Not a scraper that bypasses SSRF/allowlist restrictions, CAPTCHAs, or bot detection.
-- Not a place to paste real passwords, live session cookies, or production API keys. Every login
-  in this project — the Prompt 1 role picker and the Prompt 4 account system alike — is
-  password-free; see [docs/SECURITY_MODEL.md](docs/SECURITY_MODEL.md).
-- Not a tool that transcodes or streams anything but your own local test video files — never a
-  real platform's content, protected or otherwise.
-- Not a real payment system. The ₹1 "membership" and its checkout flow are a clearly-labeled
-  simulation — no payment processor exists, no money moves, ever.
+- Not a tool for extracting, downloading, or reconstructing protected (members-only, paywalled,
+  DRM'd) video content. It observes request/response *metadata* only — see
+  [docs/SECURITY_MODEL.md](docs/SECURITY_MODEL.md).
+- Not a tool that automates login. You sign in manually, in a real, visible browser window this
+  tool launches — it never asks for, stores, or submits a password, cookie, or token on your
+  behalf.
+- Not a scraper. It never crawls or runs against a domain you haven't explicitly configured as the
+  target or an approved origin.
+- Not a bypass for CAPTCHAs, bot detection, DRM, or membership restrictions.
+- Not a simulated/fake target. There is no synthetic video platform anywhere in this repository —
+  you point it at your own real, already-deployed application.
 
 ## Architecture at a glance
 
 ```
-apps/web        Next.js dashboard (dark/hacker-style UI): Overview, Research Workspace, Streaming
-                Lab, Membership & Sessions, Security Lab, Reports, Guided Demo
-apps/api        Fastify backend: URL analysis, HAR import, manifest parsing, a merged activity feed,
-                findings (orphaned — see docs/SECURITY_MODEL.md), rate limiting
-apps/mock-lab   Fastify mock streaming + account/channel/membership system: video upload, FFmpeg->HLS
-                chunking, manifest/segment delivery with HTTP range support, a self-contained
-                Security Testing Engine, and JSON/HTML security report generation
-packages/security  Shared SSRF/allowlist URL-safety guard + IP-pinned safe-fetch, used by apps/api
+apps/web        Next.js dashboard (dark/hacker-style UI)
+apps/api        Fastify backend: URL analysis, HAR import, manifest parsing (standalone analysis
+                 utilities, independent of the inspector below)
+apps/inspector  Fastify service: target config, Playwright browser controller, session lifecycle
+                 monitor, network observation, video-chunk/evidence analysis — the actual tool
+packages/security  Shared SSRF/URL-safety guard, safeFetch, and redaction (header + URL query-param)
+packages/manifest  Shared HLS/DASH manifest parsers
 ```
 
 Full details: [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
@@ -47,62 +44,48 @@ Full details: [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
 ## Requirements
 
 - Node.js >= 20
-- npm (ships with Node; this repo uses npm workspaces — no pnpm/yarn required)
-- **FFmpeg + ffprobe on `PATH`** — required for `apps/mock-lab`'s video chunking pipeline. Install
-  with `brew install ffmpeg` (macOS) or `apt-get install ffmpeg` (Debian/Ubuntu, also what CI
-  uses). Everything else in the repo works without it; only video upload/processing needs it.
-- Optional: Docker, if you'd rather run FFmpeg and a future PostgreSQL in containers.
+- npm (workspaces; no pnpm/yarn required)
+- A graphical display for the browser controller to actually show you the browser window (normal
+  for any desktop/laptop; not needed for `apps/api`/`apps/inspector`'s other endpoints, and not
+  needed at all if you only run the automated test suite, which runs headless).
 
 ## Setup
 
 ```bash
 npm install
+npx playwright install chromium
 cp .env.example .env
 ```
 
-The default `.env.example` values work out of the box for local development — no secrets are
-required to run this stage. `apps/mock-lab` seeds two local test accounts (**G1 — Creator**,
-**G2 — Member**) automatically on first start; `npm run seed -w apps/mock-lab` re-runs that seed
-explicitly against an existing data directory if you ever need to.
+The default `.env.example` values work out of the box — no secrets required.
 
 ## Running the services
 
-Each app runs as its own process on its own port (see `.env.example`):
-
 ```bash
-npm run dev:api        # Fastify backend     -> http://localhost:4001
-npm run dev:mock-lab   # Mock streaming lab   -> http://localhost:4002
-npm run dev:web        # Next.js dashboard    -> http://localhost:3000
+npm run dev:api        # Fastify analysis backend -> http://localhost:4001
+npm run dev:inspector  # Fastify inspector service -> http://localhost:4002
+npm run dev:web        # Next.js dashboard          -> http://localhost:3000
 ```
 
-Open `http://localhost:3000` once all three are running. The dashboard is one page with a sticky
-nav — **Overview / Research Workspace / Streaming Lab / Membership & Sessions / Security Lab /
-Reports / Guided Demo**. For the fastest way to see everything working end to end, jump straight to
-**Guided Demo** and click "run all remaining steps" — it drives the exact 11-step walkthrough below
-through real APIs with its own G1/G2 accounts, and "reset demo" cleans up afterward so it's safe to
-run again. See [docs/PRESENTATION_GUIDE.md](docs/PRESENTATION_GUIDE.md) for the narrated version.
+Open `http://localhost:3000`. The dashboard sections, in order:
 
-Manually, the same story:
-
-1. **Log in as G1** (Account Session). Upload a small MP4/WebM as `members-only` — G1's channel
-   and a ₹1.00 (simulated) membership plan already exist from the seed.
-2. Select the video — G1, as the channel owner, can already play it with no membership.
-3. **Log in as G2**. The same video is visible in the library (metadata is public) but playback is
-   blocked (`403`) until G2 activates a membership.
-4. In **Membership**, click "simulate successful payment" against G1's channel. Playback starts
-   working immediately — the session is rotated after activation and the player picks up the new
-   token automatically.
-5. Back as **G1**, open **Creator Panel** to see G2 listed as an active member, adjust the ₹
-   price, revoke G2, or review the channel's **audit log**.
-6. In **Security Lab**, click **run security tests** to execute all 19 predefined checks —
-   authentication, authorization/IDOR, membership lifecycle, streaming security — against a
-   freshly built, fully isolated fixture instance, with real expected-vs-actual results. The
-   **Interactive Security Lab** below it narrates six of those same results as named attack/defense
-   scenarios.
-7. In **Overview**, see all of the above aggregated — test summary, findings by severity, video
-   status, recent analyses — each panel labeled with exactly which endpoint it reflects.
-8. In **Reports**, download the JSON or HTML security report for any past run — redacted,
-   escaped, and explicit that a pass is not a security certification.
+1. **Target Configuration** — enter your target's base URL and a members-only video URL. The video
+   URL must belong to the target's own origin, or an origin you explicitly approve (e.g. a CDN) —
+   this is validated and enforced, never assumed.
+2. **Browser Controller & Session Monitor** — click "launch browser." A real, visible Chromium
+   window opens with its own dedicated profile. **Sign in manually, exactly as you would in any
+   browser.** The Session Monitor shows six distinct authentication-state signals as they're
+   observed — see [docs/SESSION_MONITORING.md](docs/SESSION_MONITORING.md) for exactly what each
+   means and what is (and isn't) treated as proof of a valid session.
+3. **Network Observation** — click "start observation," then browse/play video in the launched
+   browser normally. Sanitized request/response metadata appears here as it's captured —
+   sensitive query parameters redacted, response bodies never read.
+4. **Evidence** — manifests identified during playback, with a coverage report comparing what the
+   manifest declared against what the browser actually received (received / missing / failed), plus
+   a segment inventory. "Clear evidence" deletes everything this tool has recorded.
+5. **Research Workspace** — the standalone `apps/api` utilities: submit a URL for metadata analysis,
+   import a HAR capture exported from DevTools, or paste/fetch a manifest directly. Independent of
+   the inspector above; useful as a secondary, complementary analysis path.
 
 ## Running tests
 
@@ -110,184 +93,58 @@ Manually, the same story:
 npm test
 ```
 
-This runs the Vitest suites in `packages/security`, `apps/api`, and `apps/mock-lab` via npm
-workspaces — **200 tests, all passing** as of this stage (34 + 55 + 111). `apps/mock-lab`'s video
-pipeline and Security Testing Engine tests invoke **real FFmpeg** against small synthetic fixtures
-(generated once via `ffmpeg -f lavfi`, committed under `apps/mock-lab/test/fixtures/`) rather than
-mocking it — FFmpeg must be installed to run `npm test` for that workspace (see Requirements above;
-CI installs it automatically).
-
-`apps/web` has no automated test suite (no Playwright/Vitest-in-browser tests exist in this repo —
-stated here plainly rather than implied). Its correctness for this stage was verified live: running
-the production build, starting all three services from a clean environment, and driving the full
-11-step Guided Demo twice in a real browser against real local servers (including the reset flow,
-confirming repeatability). See [docs/ROADMAP.md](docs/ROADMAP.md)'s Prompt 5 completion summary for
-exactly what that covered and what it didn't.
+Runs every workspace's Vitest suite. **A large share of `apps/inspector`'s tests drive a real,
+headless Chromium against a local synthetic HTTP fixture server** (`apps/inspector/test/helpers/fixtureServer.ts`)
+— never a real target, never mocked browser behavior, per the project's explicit "use synthetic
+fixtures, verify with a real browser" requirement. `npx playwright install chromium` must have been
+run first (see Setup); CI installs it automatically.
 
 ## Backend API reference
 
-### `apps/api` — analysis engines
+### `apps/inspector`
 
 | Method | Path | Purpose |
 |---|---|---|
 | `GET` | `/health` | Liveness check. |
-| `POST` | `/api/analyze` | Runs the URL Analysis Engine: SSRF-guarded fetch + HTML metadata extraction. Persists the result. |
-| `GET` | `/api/analyses` | Lists recent analysis history (newest first, capped). |
-| `GET` | `/api/analyses/:id` | Retrieves one stored analysis result. |
-| `POST` | `/api/har/import` | Imports and sanitizes a HAR (HTTP Archive) capture. Persists the result. |
-| `GET` | `/api/har/imports` | Lists recent HAR import history (newest first, capped). |
-| `POST` | `/api/manifest/parse` | Parses HLS or DASH manifest text, either pasted directly or fetched by URL. Persists the result. |
-| `GET` | `/api/manifest/parses` | Lists recent manifest parse history (newest first, capped). |
-| `GET` | `/api/activity` | Merges URL/HAR/manifest history into one timestamp-sorted feed for the dashboard's Security Overview. |
-| `GET` | `/api/findings` | Always empty — orphaned since Prompt 1, nothing ever writes to it. Real findings come from the Security Testing Engine's reports (`GET /mock/security-tests/report`); see docs/SECURITY_MODEL.md. |
+| `GET` / `PUT` / `DELETE` | `/api/target-config` | Read, validate+save, or clear the active target configuration. |
+| `POST` | `/api/browser/launch` | Launches the visible, dedicated Chromium profile. |
+| `POST` | `/api/browser/close` | Closes it cleanly. |
+| `GET` | `/api/browser/status` | Connection state + current URL. |
+| `POST` | `/api/browser/navigate` | Loads a URL in the operator's own browser tab (any http/https URL — see docs/SECURITY_MODEL.md for why this isn't origin-restricted). |
+| `POST` | `/api/observation/start` \| `/stop` | Starts/stops recording captured network events. |
+| `GET` | `/api/observation/status` | Whether observation is currently recording. |
+| `GET` | `/api/session` | The session monitor's current state + history. |
+| `GET` | `/api/evidence/events` | Captured, sanitized network events. |
+| `GET` | `/api/evidence/manifests` | Identified and parsed manifests. |
+| `GET` | `/api/evidence/manifests/:id/coverage` | Received/missing/failed segment report for one manifest. |
+| `GET` | `/api/evidence/segments` | Segment inventory, each linked to its manifest where possible. |
+| `POST` | `/api/evidence/clear` | Deletes all captured evidence. |
 
-### `apps/mock-lab` — legacy role auth + streaming (Prompt 1/3)
-
-| Method | Path | Purpose |
-|---|---|---|
-| `POST` | `/mock/auth/login` | Issues a role-token (`guest`/`member`/`admin`) for the two Prompt 1 static demo fixtures only. |
-| `GET` / etc. | `/mock/videos/:id/manifest`, `/segments/:id` | Still serve the two static demo videos via the original role gate — untouched since Prompt 1. |
-
-### `apps/mock-lab` — account, channel, and membership system (Prompt 4)
+### `apps/api` (unchanged analysis utilities)
 
 | Method | Path | Purpose |
 |---|---|---|
-| `POST` | `/mock/session/login` | Logs in as a seeded test account (`accountLabel: "G1" \| "G2"`). No password. |
-| `POST` | `/mock/session/logout` | Revokes the current session. CSRF-protected when cookie-authenticated. |
-| `GET` | `/mock/session/me` | Session status inspector — never returns the raw token. |
-| `GET` | `/mock/channels` | Lists channels with their membership plan price (public). |
-| `GET` | `/mock/channels/:id` | One channel's detail. |
-| `PATCH` | `/mock/channels/:id/plan` | Updates the membership price — channel owner only. |
-| `GET` | `/mock/channels/:id/members` | Lists members and their status — channel owner only. |
-| `POST` | `/mock/channels/:id/members/:userId/revoke` | Revokes a member's access — channel owner only. |
-| `GET` | `/mock/channels/:id/audit` | Structured, secret-free audit log for the channel — owner only. |
-| `POST` | `/mock/channels/:id/membership/checkout` | Simulated-payment membership activation (`simulateOutcome: "success" \| "failure"`). Rotates the session on success. |
-| `GET` | `/mock/membership/me` | The current session's own memberships. |
+| `GET` | `/health` | Liveness check. |
+| `POST` | `/api/analyze` | SSRF-guarded fetch + HTML metadata extraction for an allowed URL. |
+| `GET` | `/api/analyses` / `/api/analyses/:id` | Analysis history. |
+| `POST` | `/api/har/import` | Imports and redacts a HAR capture. |
+| `GET` | `/api/har/imports` | HAR import history. |
+| `POST` | `/api/manifest/parse` | Parses pasted or fetched HLS/DASH manifest text. |
+| `GET` | `/api/manifest/parses` | Manifest parse history. |
+| `GET` | `/api/activity` | Merged URL/HAR/manifest history feed. |
 
-### `apps/mock-lab` — video pipeline (Prompt 3, authorization migrated to Prompt 4)
+Full request/response shapes and configuration: [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
 
-| Method | Path | Purpose |
-|---|---|---|
-| `POST` | `/mock/videos` | Uploads a test video (multipart, `file` + `visibility`). Requires a Prompt 4 account session (not the legacy role token). Returns `202` immediately; processes to HLS in the background. |
-| `GET` | `/mock/videos` | Lists uploaded test videos (metadata + visibility, no auth required). |
-| `GET` | `/mock/videos/:id` | Retrieves one video's metadata/status. |
-| `DELETE` | `/mock/videos/:id` | Deletes a video and its files — owner (or channel owner) only. |
-| `GET` | `/mock/videos/:id/manifest` | The master HLS playlist. Gated by channel ownership or active membership for `members`-visibility videos. |
-| `GET` | `/mock/videos/:id/playlist.m3u8` | The media playlist. Same gate, independently re-checked. |
-| `GET` | `/mock/videos/:id/segments` | Segment inventory. Same gate, independently re-checked. |
-| `GET` | `/mock/videos/:id/segments/:segmentId` | An individual `.ts` segment. Same gate; supports HTTP range requests. |
+## Known limitations
 
-### `apps/mock-lab` — Security Testing Engine (Prompt 4)
+See [docs/SECURITY_MODEL.md](docs/SECURITY_MODEL.md)'s "Threats explicitly out of scope" and
+[docs/ROADMAP.md](docs/ROADMAP.md)'s "Not built in this stage" for the full, honest list —
+summarized: no automated security-test execution yet (observation/evidence only), no evidence
+export, no rate limiting or auth on the local services themselves (acceptable for a local,
+single-operator tool), and the login-detection heuristic in the session monitor is exactly that — a
+heuristic, documented as such.
 
-| Method | Path | Purpose |
-|---|---|---|
-| `POST` | `/mock/security-tests/run` | Executes all 19 predefined checks against a fresh, fully isolated fixture app and returns the full result set. |
-| `GET` | `/mock/security-tests/results` | Retrieves recent persisted runs (most recent first). |
-| `GET` | `/mock/security-tests/report` | Builds a JSON (default) or HTML (`?format=html`) report from a past run (`?runId=`, defaults to latest). Escaped, redacted, downloadable (`Content-Disposition: attachment`). |
+## Next step
 
-Full request/response shapes, status-code mapping, and configuration:
-[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
-
-## What's new in Prompt 5 (final integration)
-
-- **Security Overview** aggregating real, already-persisted data from both backends — security test
-  summary, findings by severity, video processing status, channels/membership, recent URL/HAR/
-  manifest analyses — each panel labeled with the exact endpoint it reflects.
-- **Interactive Security Lab** — the project vision's six named scenarios, each mapped to a real
-  Security Testing Engine case id (no second, frontend-only test implementation), with explicit
-  attack-vs-defense framing.
-- **Security reporting** — downloadable JSON/HTML reports per test run, redacted and
-  HTML-escaped, carrying an explicit "not a security certification" disclaimer.
-- **Guided Demo** — a deterministic, repeatable 11-step walkthrough using only real local APIs and
-  synthetic G1/G2 accounts, with a reset action for clean re-runs.
-- **HAR/manifest history persistence** and a merged `/api/activity` feed (previously only URL
-  analyses persisted).
-- **Hardening**: fixed a real cross-store torn-read race condition (atomic temp-file + rename
-  writes), added rate limiting to the previously-unprotected login endpoint, fixed a cross-panel
-  stale-data bug. All with regression tests — see docs/SECURITY_MODEL.md and docs/ROADMAP.md.
-
-Full detail: [docs/ROADMAP.md](docs/ROADMAP.md)'s Prompt 5 section and completion summary.
-
-## What was implemented in Prompt 4 (membership authorization and the security testing engine)
-
-- **Synthetic accounts, channels, and memberships** (`apps/mock-lab/src/account/`) — two seeded
-  local test accounts (G1 — Creator, G2 — Member), a channel auto-created for whoever uploads a
-  video, a membership plan priced in minor units (₹1.00 = 100 paise), a membership
-  subscription/entitlement with `active`/`expired`/`revoked`/`payment_failed` lifecycle states, and
-  a simulated-payment record always carrying the literal marker
-  `"SIMULATED TEST PAYMENT — not a real financial transaction"`.
-- **Real, revocable sessions** — an opaque, cryptographically random token whose **hash** (never
-  the raw value) is the only thing persisted server-side, enabling genuine revocation and
-  expiration (impossible with Prompt 1's stateless role JWT). Issued via an httpOnly `SameSite=Lax`
-  cookie *and* returned in the login response body for the dashboard's cross-origin bearer-token
-  use — see docs/SECURITY_MODEL.md for exactly why both exist. Rotated on login and after
-  privilege changes (membership activation).
-- **Double-submit CSRF protection** for every cookie-authenticated, state-changing request
-  (logout, plan updates, membership checkout, revocation) — skipped only for bearer-authenticated
-  requests, which are immune to CSRF by construction.
-- **Centralized authorization** (`account/authorization.ts`) — one function, `authorizeVideoResourceAccess()`,
-  implements every check the project vision lists (valid session → video exists → visibility
-  policy → channel ownership or active, non-expired, non-revoked membership → the requested
-  resource actually belongs to the video) and is the *only* gate every protected video route calls,
-  independently, on every single request.
-- **Structured, secret-free audit trail** — authentication, membership lifecycle, and authorization
-  decisions are all recorded with a session *fingerprint* (12 hex chars of a hash), never the
-  token; retention-capped; readable only by the relevant channel's owner.
-- **Security Testing Engine** (`apps/mock-lab/src/securityTests/`) — 19 predefined test cases
-  across authentication, authorization/IDOR, membership lifecycle, and streaming security,
-  executed against a freshly built, fully isolated fixture app (own temp data directory, own
-  FFmpeg-processed videos, torn down after the run). Every result records the real HTTP status
-  observed, redacted evidence, and — for failures only — severity and remediation. The two
-  "signed resource grant" scenarios are reported `not_applicable` with an explicit reason rather
-  than a fabricated pass, since this implementation has no separate signed-grant mechanism.
-- **Dashboard** — an account session bar and session inspector, a Creator Panel (channel price,
-  member list with revoke, audit log viewer), a Membership Panel (browse channels, clearly-labeled
-  simulated-payment buttons, live membership status), and a Security Testing Engine panel with
-  expandable per-test evidence.
-
-## Storage layout (`apps/mock-lab`)
-
-```
-apps/mock-lab/data/
-  users.json, channels.json, membership-plans.json, memberships.json,
-  payments.json, sessions.json, audit.json, security-test-runs.json
-                               # one JSON-array file per entity — same read-modify-write pattern
-                               # as apps/api's FindingsStore/AnalysisStore, now with an in-process
-                               # write queue serializing concurrent mutations (see
-                               # docs/SECURITY_MODEL.md's "a real bug this caught")
-  videos.json                 # VideoStore — now includes channelId per video
-  videos/<id>/
-    original.<mp4|webm>       # the uploaded file, as received
-    hls/
-      segment-000.ts, ...     # FFmpeg-generated segments (master/media playlists are built
-                               # on demand from stored metadata, not written to disk)
-```
-
-Deleting a video removes both its `videos.json` entry and its entire `videos/<id>/` directory.
-Failed/interrupted processing never leaves a partial `hls/` directory in place.
-
-## Known limitations (see docs/SECURITY_MODEL.md for detail)
-
-- No database yet — every entity listed above is a JSON file on disk, serialized through an
-  in-process write queue that's correct for this single-process app but not a substitute for real
-  transactional storage. Moves to PostgreSQL/Prisma in Prompt 5 if reporting needs it.
-- Membership is channel-scoped, but there is no per-video entitlement — a membership grants access
-  to every `members`-visibility video on that channel, not individually priced videos.
-- Cross-origin cookie auth (apps/web on :3000, apps/mock-lab on :4002) doesn't reliably carry
-  `SameSite=Lax` cookies on fetch/XHR in local dev; the dashboard authenticates with the bearer
-  token instead, documented explicitly rather than silently worked around.
-- Single rendition only — every uploaded video produces one HLS quality level, not a multi-bitrate
-  ABR ladder.
-- `apps/mock-lab` rate-limits only `POST /mock/session/login` (20/minute); no other route there is
-  rate-limited and there's no cap on concurrent transcodes — acceptable for a local, single-user
-  research tool. See docs/SECURITY_MODEL.md.
-- No automated end-to-end test suite for `apps/web` — this stage's dashboard/demo-flow correctness
-  was verified live in a real browser, not via an automated, CI-runnable suite.
-
-## Project status
-
-All five prompts are complete. See [docs/ROADMAP.md](docs/ROADMAP.md) for the full build history
-and the Prompt 5 completion summary (what's implemented, tested, spot-checked, or explicitly left
-incomplete), and [docs/PRESENTATION_GUIDE.md](docs/PRESENTATION_GUIDE.md) for a ready-to-run college
-demonstration script covering the problem, architecture, threat model, security controls, attack
-simulations, test results, and limitations.
+See [docs/ROADMAP.md](docs/ROADMAP.md) for what's likely to come next — a real-target security test
+engine built from observed evidence, and evidence/report export.

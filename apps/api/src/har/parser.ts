@@ -1,5 +1,5 @@
 import { harFileSchema, type HarEntry } from "./types.js";
-import { redactHeaders, redactUrl, type NameValue } from "./redact.js";
+import { redactHeaders, redactUrl, type NameValue } from "@research-lab/security";
 
 export interface HarEntrySummary {
   method: string;

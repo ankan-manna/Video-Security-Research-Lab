@@ -1,4 +1,4 @@
-import type { ManifestAnalysis } from "../manifest/types.js";
+import type { ManifestAnalysis } from "@research-lab/manifest";
 import { HistoryStore } from "./historyStore.js";
 
 export interface ManifestParseRecord {

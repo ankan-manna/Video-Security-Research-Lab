@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import { API_BASE_URL, MOCK_LAB_BASE_URL } from "@/lib/config";
+import { API_BASE_URL, INSPECTOR_BASE_URL } from "@/lib/config";
 
 type ServiceState = "checking" | "online" | "offline";
 
@@ -12,7 +12,7 @@ interface ServiceProbe {
 
 const SERVICES: ServiceProbe[] = [
   { label: "api", url: `${API_BASE_URL}/health` },
-  { label: "mock-lab", url: `${MOCK_LAB_BASE_URL}/health` },
+  { label: "inspector", url: `${INSPECTOR_BASE_URL}/health` },
 ];
 
 function Dot({ state }: { state: ServiceState }) {

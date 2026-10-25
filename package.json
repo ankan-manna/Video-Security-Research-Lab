@@ -1,8 +1,8 @@
 {
-  "name": "video-security-research-lab",
+  "name": "security-inspector",
   "private": true,
-  "version": "0.1.0",
-  "description": "Standalone security research lab for analyzing video URLs, HTTP metadata, and streaming formats, with a local mock lab for authentication/access-control demonstrations.",
+  "version": "0.2.0",
+  "description": "Browser-based security testing tool that observes authentication, manifest delivery, and segment access control on a real, already-deployed target application.",
   "workspaces": [
     "packages/*",
     "apps/*"
@@ -12,7 +12,7 @@
     "test": "npm run test --workspaces --if-present",
     "typecheck": "npm run typecheck --workspaces --if-present",
     "dev:api": "npm run dev -w apps/api",
-    "dev:mock-lab": "npm run dev -w apps/mock-lab",
+    "dev:inspector": "npm run dev -w apps/inspector",
     "dev:web": "npm run dev -w apps/web"
   },
   "engines": {

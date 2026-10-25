@@ -3,7 +3,7 @@ import type { FastifyInstance } from "fastify";
 import { z } from "zod";
 import { safeFetch } from "@research-lab/security";
 import type { Env } from "../env.js";
-import { analyzeManifestText } from "../manifest/analyzeManifest.js";
+import { analyzeManifestText } from "@research-lab/manifest";
 import type { ManifestParseStore } from "../store/manifestParseStore.js";
 
 const manifestParseRequestSchema = z

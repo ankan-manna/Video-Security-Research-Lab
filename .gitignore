@@ -13,9 +13,10 @@ apps/web/.next/
 # findings store data (generated at runtime, not fixtures)
 apps/api/data/*.json
 
-# uploaded test videos + generated HLS output (generated at runtime, not fixtures)
-apps/mock-lab/data/*.json
-apps/mock-lab/data/videos/
+# apps/inspector: target config, captured evidence, and the dedicated Playwright browser
+# profile must never be committed — see docs/SECURITY_MODEL.md.
+apps/inspector/data/
+apps/inspector/browser-profile/
 
 # logs
 *.log

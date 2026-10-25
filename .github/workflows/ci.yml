@@ -14,8 +14,8 @@ jobs:
         with:
           node-version: "20"
           cache: "npm"
-      # apps/mock-lab's video pipeline (Prompt 3) shells out to real ffmpeg/ffprobe.
-      - run: sudo apt-get update && sudo apt-get install -y ffmpeg
       - run: npm ci
+      # apps/inspector drives a real browser via Playwright.
+      - run: npx playwright install --with-deps chromium
       - run: npm run build --workspaces --if-present
       - run: npm test

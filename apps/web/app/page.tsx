@@ -6,29 +6,18 @@ import { UrlForm } from "@/components/UrlForm";
 import { AnalysisHistory } from "@/components/AnalysisHistory";
 import { HarUpload } from "@/components/HarUpload";
 import { ManifestInspector } from "@/components/ManifestInspector";
-import { AccountSessionProvider } from "@/lib/accountSession";
-import { AccountSessionBar } from "@/components/AccountSessionBar";
-import { VideoUpload } from "@/components/VideoUpload";
-import { VideoLibrary } from "@/components/VideoLibrary";
-import { VideoPlayer } from "@/components/VideoPlayer";
-import { SegmentInventory } from "@/components/SegmentInventory";
-import { CreatorPanel } from "@/components/CreatorPanel";
-import { MembershipPanel } from "@/components/MembershipPanel";
-import { SecurityTestRunner } from "@/components/SecurityTestRunner";
-import { SessionInspector } from "@/components/SessionInspector";
-import { SecurityOverview } from "@/components/SecurityOverview";
-import { SecurityLabScenarios } from "@/components/SecurityLabScenarios";
-import { ReportsPanel } from "@/components/ReportsPanel";
-import { DemoMode } from "@/components/DemoMode";
+import { TargetConfigPanel } from "@/components/TargetConfigPanel";
+import { BrowserControllerPanel } from "@/components/BrowserControllerPanel";
+import { SessionMonitorPanel } from "@/components/SessionMonitorPanel";
+import { NetworkObservationPanel } from "@/components/NetworkObservationPanel";
+import { EvidenceInventoryPanel } from "@/components/EvidenceInventoryPanel";
 
 const NAV_SECTIONS = [
-  { id: "overview", label: "Overview" },
+  { id: "target", label: "Target Configuration" },
+  { id: "browser", label: "Browser & Session" },
+  { id: "network", label: "Network Observation" },
+  { id: "evidence", label: "Evidence" },
   { id: "research", label: "Research Workspace" },
-  { id: "streaming", label: "Streaming Lab" },
-  { id: "membership", label: "Membership & Sessions" },
-  { id: "security-lab", label: "Security Lab" },
-  { id: "reports", label: "Reports" },
-  { id: "demo", label: "Guided Demo" },
 ];
 
 function NavBar() {
@@ -57,101 +46,66 @@ function SectionHeading({ children }: { children: React.ReactNode }) {
 
 export default function DashboardPage() {
   const [historyRefreshKey, setHistoryRefreshKey] = useState(0);
-  const [libraryRefreshKey, setLibraryRefreshKey] = useState(0);
-  const [selectedVideoId, setSelectedVideoId] = useState<string | null>(null);
+  const [evidenceRefreshKey, setEvidenceRefreshKey] = useState(0);
+
+  const bumpEvidence = () => setEvidenceRefreshKey((key) => key + 1);
 
   return (
-    <AccountSessionProvider>
-      <main className="mx-auto max-w-6xl px-6 py-10">
-        <header className="mb-6 border-b border-lab-border pb-4">
-          <p className="text-[11px] uppercase tracking-widest text-neutral-500">research dashboard</p>
-          <h1 className="mt-1 text-2xl font-bold text-lab-accent">
-            <span className="text-lab-accent2">&gt;</span> Video Security Research Lab
-          </h1>
-          <p className="mt-2 max-w-2xl text-xs text-neutral-400">
-            Standalone security research tooling for analyzing video URLs, permitted HTTP metadata,
-            and streaming formats, and for demonstrating authentication/access-control concepts
-            against a local mock lab. Independent of any production video platform or clone.
-          </p>
-          <div className="mt-3">
-            <StatusCard />
-          </div>
-        </header>
+    <main className="mx-auto max-w-6xl px-6 py-10">
+      <header className="mb-6 border-b border-lab-border pb-4">
+        <p className="text-[11px] uppercase tracking-widest text-neutral-500">security inspector</p>
+        <h1 className="mt-1 text-2xl font-bold text-lab-accent">
+          <span className="text-lab-accent2">&gt;</span> Browser-Based Security Testing Tool
+        </h1>
+        <p className="mt-2 max-w-2xl text-xs text-neutral-400">
+          Observes authentication, manifest delivery, and media-segment access control on a real,
+          already-deployed target application via a visible, manually-driven browser session. Never
+          automates login, never extracts credentials or session tokens, never reconstructs protected
+          media.
+        </p>
+        <div className="mt-3">
+          <StatusCard />
+        </div>
+      </header>
 
-        <NavBar />
+      <NavBar />
 
-        <section id="overview" className="scroll-mt-16">
-          <SectionHeading>Security Overview</SectionHeading>
-          <SecurityOverview />
-        </section>
+      <section id="target" className="scroll-mt-16">
+        <SectionHeading>Target Configuration</SectionHeading>
+        <TargetConfigPanel />
+      </section>
 
-        <section id="research" className="mt-10 scroll-mt-16">
-          <SectionHeading>Video Research Workspace</SectionHeading>
-          <div className="space-y-6">
-            <AnalysisHistory refreshKey={historyRefreshKey} />
-            <UrlForm onAnalyzed={() => setHistoryRefreshKey((key) => key + 1)} />
-            <HarUpload />
-            <ManifestInspector />
-          </div>
-        </section>
+      <section id="browser" className="mt-10 scroll-mt-16">
+        <SectionHeading>Browser Controller &amp; Session Monitor</SectionHeading>
+        <div className="grid gap-6 md:grid-cols-2">
+          <BrowserControllerPanel onChanged={bumpEvidence} />
+          <SessionMonitorPanel />
+        </div>
+      </section>
 
-        <section id="streaming" className="mt-10 scroll-mt-16">
-          <SectionHeading>Local Video Chunking &amp; Streaming Lab</SectionHeading>
-          <div className="space-y-6">
-            <VideoUpload onReady={() => setLibraryRefreshKey((key) => key + 1)} />
-            <div className="grid gap-6 md:grid-cols-2">
-              <VideoLibrary
-                refreshKey={libraryRefreshKey}
-                selectedId={selectedVideoId}
-                onSelect={setSelectedVideoId}
-                onDeleted={() => {
-                  setLibraryRefreshKey((key) => key + 1);
-                  setSelectedVideoId(null);
-                }}
-              />
-              <SegmentInventory videoId={selectedVideoId} />
-            </div>
-            <VideoPlayer videoId={selectedVideoId} />
-          </div>
-        </section>
+      <section id="network" className="mt-10 scroll-mt-16">
+        <SectionHeading>Network Observation</SectionHeading>
+        <NetworkObservationPanel refreshKey={evidenceRefreshKey} />
+      </section>
 
-        <section id="membership" className="mt-10 scroll-mt-16">
-          <SectionHeading>Membership, Sessions &amp; Access Control</SectionHeading>
-          <div className="space-y-6">
-            <div className="grid gap-6 md:grid-cols-2">
-              <AccountSessionBar />
-              <SessionInspector />
-            </div>
-            <div className="grid gap-6 md:grid-cols-2">
-              <CreatorPanel />
-              <MembershipPanel />
-            </div>
-          </div>
-        </section>
+      <section id="evidence" className="mt-10 scroll-mt-16">
+        <SectionHeading>Video Chunk Analysis &amp; Evidence</SectionHeading>
+        <EvidenceInventoryPanel refreshKey={evidenceRefreshKey} onCleared={bumpEvidence} />
+      </section>
 
-        <section id="security-lab" className="mt-10 scroll-mt-16">
-          <SectionHeading>Security Testing Engine &amp; Interactive Lab</SectionHeading>
-          <div className="space-y-6">
-            <SecurityTestRunner />
-            <SecurityLabScenarios />
-          </div>
-        </section>
+      <section id="research" className="mt-10 scroll-mt-16">
+        <SectionHeading>Video Research Workspace</SectionHeading>
+        <div className="space-y-6">
+          <AnalysisHistory refreshKey={historyRefreshKey} />
+          <UrlForm onAnalyzed={() => setHistoryRefreshKey((key) => key + 1)} />
+          <HarUpload />
+          <ManifestInspector />
+        </div>
+      </section>
 
-        <section id="reports" className="mt-10 scroll-mt-16">
-          <SectionHeading>Security Reporting</SectionHeading>
-          <ReportsPanel />
-        </section>
-
-        <section id="demo" className="mt-10 scroll-mt-16">
-          <SectionHeading>Guided College Demonstration</SectionHeading>
-          <DemoMode />
-        </section>
-
-        <footer className="mt-10 border-t border-lab-border pt-4 text-[11px] text-neutral-600">
-          Final integration — dashboard, security overview, interactive security lab, reporting, and
-          guided demo. See docs/ROADMAP.md and docs/PRESENTATION_GUIDE.md.
-        </footer>
-      </main>
-    </AccountSessionProvider>
+      <footer className="mt-10 border-t border-lab-border pt-4 text-[11px] text-neutral-600">
+        See docs/REFACTOR_PLAN.md, docs/ARCHITECTURE.md, and docs/SESSION_MONITORING.md.
+      </footer>
+    </main>
   );
 }

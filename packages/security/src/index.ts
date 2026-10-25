@@ -15,3 +15,6 @@ export type {
   SafeFetchFailureStage,
   PinnedLookupFn,
 } from "./safeFetch.js";
+
+export { isSensitiveHeaderName, redactHeaders, redactUrl } from "./redact.js";
+export type { NameValue } from "./redact.js";
