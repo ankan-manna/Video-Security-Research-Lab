@@ -3,7 +3,7 @@
 import { useEffect, useRef, useState } from "react";
 import Hls from "hls.js";
 import { MOCK_LAB_BASE_URL } from "@/lib/config";
-import { useMockLabSession } from "@/lib/mockLabSession";
+import { useAccountSession } from "@/lib/accountSession";
 
 interface DiagnosticEvent {
   time: string;
@@ -12,7 +12,7 @@ interface DiagnosticEvent {
 
 export function VideoPlayer({ videoId }: { videoId: string | null }) {
   const videoRef = useRef<HTMLVideoElement>(null);
-  const { session } = useMockLabSession();
+  const { session } = useAccountSession();
   const [events, setEvents] = useState<DiagnosticEvent[]>([]);
   const [error, setError] = useState<string | null>(null);
 

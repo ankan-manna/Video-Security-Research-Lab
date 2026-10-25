@@ -2,12 +2,13 @@
 
 import { useCallback, useEffect, useState } from "react";
 import { MOCK_LAB_BASE_URL } from "@/lib/config";
-import { useMockLabSession } from "@/lib/mockLabSession";
+import { useAccountSession } from "@/lib/accountSession";
 import { StatusBadge } from "./StatusBadge";
 
 export interface VideoSummary {
   id: string;
   ownerId: string;
+  channelId: string;
   originalFilename: string;
   visibility: "public" | "members";
   status: "uploaded" | "processing" | "ready" | "failed";
@@ -27,7 +28,7 @@ interface VideoLibraryProps {
 }
 
 export function VideoLibrary({ refreshKey, selectedId, onSelect, onDeleted }: VideoLibraryProps) {
-  const { session } = useMockLabSession();
+  const { session } = useAccountSession();
   const [videos, setVideos] = useState<VideoSummary[] | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [deleteError, setDeleteError] = useState<string | null>(null);

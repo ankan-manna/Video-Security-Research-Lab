@@ -96,35 +96,73 @@ Prompt 1 static demo fixtures (which remain exactly as they were, still covered 
   ownership/delete (owner, non-owner, admin override, demo-video protection), and path-traversal
   resistance.
 
-## Prompt 4 — Security test engine and auth/access-control simulations
+## Prompt 4 — Membership authorization and the security testing engine ✅
 
-- **Security Test Engine** (`apps/api`): orchestrates test runs against `apps/mock-lab` —
-  authenticated vs. unauthenticated access, expired sessions, role-based authorization, IDOR, and
-  unauthorized segment requests — driving the `AccessPolicyTarget` authorization gate built in
-  Prompt 3 (shared by the static demo fixtures and real uploaded videos) rather than adding new
-  bypass logic or a second authorization mechanism. Segment ids (`segment-000.ts`, ...) are already
-  predictable, which is exactly the shape real IDOR test cases need.
-- Introduce **PostgreSQL + Prisma** here (not before): models for test runs, expected-vs-actual
-  outcomes, and audit events — replacing the Prompt 1/3 JSON findings/video-registry files once
-  results need to be structured and queryable. Existing `FindingsStore`/`AnalysisStore`/
-  `VideoStore` call sites get migrated, not duplicated.
-- Consider **Redis + BullMQ** only if test runs become slow/numerous enough to need async queuing
-  (per the "add only when needed" engineering requirement) — not assumed in advance.
-- Tests: integration tests asserting each test case's expected vs. actual outcome is recorded
-  correctly.
+Two seeded local test accounts, a real channel/membership/session system layered *alongside* (not
+replacing) Prompt 1's role-token gate, and a self-contained Security Testing Engine. Everything
+lives in `apps/mock-lab/src/account/` and `src/securityTests/`.
+
+- **Synthetic accounts**: G1 (Creator, owns a channel + ₹1.00 simulated membership plan) and G2
+  (Member). `npm run seed -w apps/mock-lab` re-seeds explicitly; the real server also seeds
+  idempotently on every start. No passwords anywhere.
+- **Entitlement model**: `User` → `Channel` → `MembershipPlan` → `Membership` (lifecycle:
+  `active`/`expired`/`revoked`/`payment_failed`) → `SimulatedPayment` (always labeled, never real).
+  `VideoRecord` gained a `channelId`; video upload now requires a real account session instead of
+  the Prompt 3 role token, since membership checks are per-channel.
+- **Real sessions**: opaque random tokens, only their SHA-256 hash persisted, enabling genuine
+  revocation/expiration a stateless JWT structurally cannot provide. httpOnly + `SameSite=Lax`
+  cookie *and* bearer-token body return (documented cross-origin-dev reasoning in
+  `docs/SECURITY_MODEL.md`); double-submit CSRF protection on every cookie-authenticated
+  state-changing endpoint; rotation on login and after membership activation.
+- **Centralized authorization**: one function, `authorizeVideoResourceAccess()`, implementing the
+  full checklist (valid session → video exists → visibility → channel ownership or active
+  membership → resource belongs to the video) — the single gate every protected video route calls
+  independently.
+- **Structured, secret-free audit trail**: timestamped events for auth, membership lifecycle, and
+  authorization decisions, referencing sessions only by an irreversible fingerprint, retention-
+  capped, readable only by the relevant channel owner.
+- **Security Testing Engine**: 19 predefined test cases (5 authentication, 5 authorization/IDOR, 5
+  membership lifecycle, 4 streaming security — 2 of which are honestly reported `not_applicable`
+  rather than faked) executed via `app.inject()` against a freshly built, fully isolated fixture
+  app (own temp dir, own FFmpeg-processed videos, torn down after). Triggerable from the dashboard
+  or `POST /mock/security-tests/run`; results persisted and viewable via
+  `GET /mock/security-tests/results`.
+- Dashboard: account session bar + session inspector, Creator Panel (price, members, revoke, audit
+  log), Membership Panel (browse, clearly-labeled simulated-payment buttons, live status), Security
+  Testing Engine panel with expandable per-test expected-vs-actual evidence. The Prompt 3 video
+  upload/library/player/inventory components were migrated onto the new session system (their
+  Prompt 3 role-based auth no longer applies to real video routes).
+- Tests: 97 passing in `apps/mock-lab` (up from 66 — 31 new: 24 account-system tests across
+  session/CSRF/membership/audit, 7 for the Security Testing Engine's own API and output integrity),
+  bringing the monorepo total to **179**. The Prompt 3 upload/streaming test file was updated to
+  log in via the new account system rather than the retired role-based upload path — the pipeline
+  behavior it tests (FFmpeg processing, range requests, path traversal resistance) is unchanged;
+  only how a test authenticates to reach it changed.
+- **A real concurrency bug found and fixed**: the Security Testing Engine's fixture builder
+  originally uploaded two videos without awaiting between them, racing two background
+  `processVideo()` calls against the same `videos.json` file and silently losing one's final
+  `status: "ready"` update (a lost-update read-modify-write race). Fixed with an in-process write
+  queue added to both `VideoStore` and the shared `JsonStore` — see `docs/SECURITY_MODEL.md`.
 
 ## Prompt 5 — Dashboard polish, reporting, integration tests, demonstration docs
 
-- **Findings and Reporting**: concise security report generation (reproduction steps, impact,
-  severity, remediation) from the Prompt 4 structured results.
-- Dashboard polish: interactive security results (Recharts visualizations), refined hacker-style
-  UI across all views built in Prompts 2–4.
-- **Playwright** end-to-end tests covering the full workflow: submit URL → (validated/guarded)
-  analysis → HAR import → manifest analysis → run security tests against the mock lab → generate
-  report. This is intentionally the first stage with Playwright, not Prompt 1 — end-to-end
-  coverage needs the full workflow to exist first.
+- **Findings and Reporting**: translate Security Testing Engine runs (already expected-vs-actual,
+  severity, remediation per `docs/SECURITY_MODEL.md`) into a readable report view — reproduction
+  steps, impact, a print/export-friendly layout — rather than building a second, separate findings
+  pipeline. `FindingsStore` (Prompt 1, currently unused by anything) is the natural landing spot if
+  a persisted "findings" concept distinct from raw test runs turns out to be needed.
+- Dashboard polish: interactive results visualizations (Recharts), refined hacker-style UI
+  consistency across all views built in Prompts 2–4.
+- **Playwright** end-to-end tests covering the full G1/G2 workflow: upload → configure visibility
+  and price → G2 browses → simulated-payment activation → protected playback → creator audit
+  review → security test run. This is intentionally the first stage with Playwright, not Prompt 1
+  — end-to-end coverage needs the full workflow to exist first.
 - CI (GitHub Actions): expand beyond install/build/unit-test to include the Playwright suite.
-- Demonstration documentation for the showcase (what to click through, what each panel proves).
+- Demonstration documentation for the college showcase (what to click through, what each panel
+  proves, suggested live-demo script using the G1/G2 flow already built).
+- Introduce **PostgreSQL + Prisma** here, only if the reporting view genuinely needs structured,
+  queryable storage beyond what the existing JSON stores provide — not assumed in advance, per the
+  "add only when needed" engineering principle carried through every prior stage.
 
 ## Explicit non-goals (every stage)
 

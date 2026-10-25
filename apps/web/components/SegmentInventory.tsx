@@ -2,7 +2,7 @@
 
 import { useEffect, useState } from "react";
 import { MOCK_LAB_BASE_URL } from "@/lib/config";
-import { useMockLabSession } from "@/lib/mockLabSession";
+import { useAccountSession } from "@/lib/accountSession";
 
 interface SegmentInfo {
   id: string;
@@ -13,7 +13,7 @@ interface SegmentInfo {
 }
 
 export function SegmentInventory({ videoId }: { videoId: string | null }) {
-  const { session } = useMockLabSession();
+  const { session } = useAccountSession();
   const [segments, setSegments] = useState<SegmentInfo[] | null>(null);
   const [error, setError] = useState<string | null>(null);
 

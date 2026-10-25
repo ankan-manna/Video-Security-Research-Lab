@@ -14,6 +14,10 @@ async function main() {
       maxUploadBytes: env.MOCK_LAB_MAX_UPLOAD_BYTES,
       maxDurationSeconds: env.MOCK_LAB_MAX_DURATION_SECONDS,
       segmentDurationSeconds: env.MOCK_LAB_SEGMENT_DURATION_SECONDS,
+      isProduction: env.NODE_ENV === "production",
+      sessionTtlSeconds: env.MOCK_LAB_SESSION_TTL_SECONDS,
+      membershipDurationSeconds: env.MOCK_LAB_MEMBERSHIP_DURATION_SECONDS,
+      auditMaxEntries: env.MOCK_LAB_AUDIT_MAX_ENTRIES,
     },
     true,
   );

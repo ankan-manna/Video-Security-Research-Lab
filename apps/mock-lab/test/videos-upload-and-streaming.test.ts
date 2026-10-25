@@ -4,7 +4,6 @@ import { randomUUID } from "node:crypto";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it, beforeEach, afterEach } from "vitest";
 import { buildMockLabApp } from "../src/app.js";
-import { SyntheticAuth } from "../src/auth/syntheticAuth.js";
 import { videoDir } from "../src/video/paths.js";
 import { buildMultipartPayload, multipartHeaders, waitForVideoStatus } from "./helpers.js";
 
@@ -34,17 +33,43 @@ async function appWithAuth(overrides: Partial<Parameters<typeof buildMockLabApp>
     segmentDurationSeconds: 1,
     ...overrides,
   });
-  const auth = new SyntheticAuth(SECRET);
-  return { app, auth };
+  return { app };
 }
 
-async function login(app: Awaited<ReturnType<typeof buildMockLabApp>>, role: "guest" | "member" | "admin", sub?: string) {
+/**
+ * Logs in via the real Prompt 4 account system (buildMockLabApp seeds G1
+ * and G2 on every fresh dataDir, same as the live server does on startup).
+ * No password — picking the account label is the entire login, same
+ * no-real-credentials spirit as Prompt 1's role picker, just backed by a
+ * real revocable session now instead of a stateless role token.
+ */
+async function login(app: Awaited<ReturnType<typeof buildMockLabApp>>, accountLabel: "G1" | "G2") {
   const response = await app.inject({
     method: "POST",
-    url: "/mock/auth/login",
-    payload: { role, ...(sub ? { sub } : {}) },
+    url: "/mock/session/login",
+    payload: { accountLabel },
   });
-  return response.json() as { token: string; sub: string; role: string };
+  return response.json() as { token: string; csrfToken: string; user: { id: string; label: string } };
+}
+
+async function activateMembership(app: Awaited<ReturnType<typeof buildMockLabApp>>, token: string, channelId: string) {
+  const response = await app.inject({
+    method: "POST",
+    url: `/mock/channels/${channelId}/membership/checkout`,
+    headers: { authorization: `Bearer ${token}` },
+    payload: { simulateOutcome: "success" },
+  });
+  return response.json() as { session: { token: string } };
+}
+
+async function g1ChannelId(app: Awaited<ReturnType<typeof buildMockLabApp>>, g1Token: string): Promise<string> {
+  const response = await app.inject({
+    method: "GET",
+    url: "/mock/channels",
+    headers: { authorization: `Bearer ${g1Token}` },
+  });
+  const { channels } = response.json();
+  return channels[0].id as string;
 }
 
 async function uploadFixture(
@@ -78,7 +103,7 @@ describe("POST /mock/videos (upload)", () => {
 
   it("accepts a valid MP4 upload and processes it to ready", async () => {
     const { app } = await appWithAuth();
-    const { token } = await login(app, "member");
+    const { token } = await login(app, "G1");
 
     const uploadResponse = await uploadFixture(app, token, "sample.mp4");
     expect(uploadResponse.statusCode).toBe(202);
@@ -95,7 +120,7 @@ describe("POST /mock/videos (upload)", () => {
 
   it("rejects a file that isn't a recognized video format (checked by signature)", async () => {
     const { app } = await appWithAuth();
-    const { token } = await login(app, "member");
+    const { token } = await login(app, "G1");
 
     const badBuffer = await fs.readFile(path.join(fixturesDir, "not-a-video.mp4"));
     const payload = buildMultipartPayload([
@@ -110,7 +135,7 @@ describe("POST /mock/videos (upload)", () => {
 
   it("rejects an oversized upload with 413", async () => {
     const { app } = await appWithAuth({ maxUploadBytes: 1000 });
-    const { token } = await login(app, "member");
+    const { token } = await login(app, "G1");
 
     const response = await uploadFixture(app, token, "sample.mp4");
     expect(response.statusCode).toBe(413);
@@ -120,7 +145,7 @@ describe("POST /mock/videos (upload)", () => {
 
   it("rejects a request with no file field", async () => {
     const { app } = await appWithAuth();
-    const { token } = await login(app, "member");
+    const { token } = await login(app, "G1");
 
     const payload = buildMultipartPayload([{ name: "visibility", value: "public" }]);
     const response = await app.inject({ method: "POST", url: "/mock/videos", headers: multipartHeaders(token), payload });
@@ -131,7 +156,7 @@ describe("POST /mock/videos (upload)", () => {
 
   it("fails processing cleanly for a video exceeding the duration limit, without disclosing the data directory", async () => {
     const { app } = await appWithAuth({ maxDurationSeconds: 1 });
-    const { token } = await login(app, "member");
+    const { token } = await login(app, "G1");
 
     const uploadResponse = await uploadFixture(app, token, "sample.mp4");
     const { id } = uploadResponse.json();
@@ -152,7 +177,7 @@ describe("GET /mock/videos (listing)", () => {
     // library a player could select from; they remain reachable directly by id for the existing
     // fixture-based tests in auth-and-access.test.ts.
     const { app } = await appWithAuth();
-    const { token } = await login(app, "member");
+    const { token } = await login(app, "G1");
     const uploadResponse = await uploadFixture(app, token, "sample.mp4");
     const { id } = uploadResponse.json();
     await waitForVideoStatus(app, id);
@@ -182,7 +207,7 @@ describe("manifest, playlist, segment inventory, and segment delivery for upload
 
   it("serves a public video's manifest, playlist, inventory, and segments without auth", async () => {
     const { app } = await appWithAuth();
-    const { token } = await login(app, "member");
+    const { token } = await login(app, "G1");
     const id = await uploadAndWaitReady(app, token, "public");
 
     const manifest = await app.inject({ method: "GET", url: `/mock/videos/${id}/manifest` });
@@ -213,7 +238,7 @@ describe("manifest, playlist, segment inventory, and segment delivery for upload
 
   it("supports HTTP range requests on a segment (206) and rejects an out-of-range request (416)", async () => {
     const { app } = await appWithAuth();
-    const { token } = await login(app, "member");
+    const { token } = await login(app, "G1");
     const id = await uploadAndWaitReady(app, token, "public");
 
     const inventory = await app.inject({ method: "GET", url: `/mock/videos/${id}/segments` });
@@ -243,7 +268,7 @@ describe("manifest, playlist, segment inventory, and segment delivery for upload
 
   it("404s for an unknown video id and an unknown segment id", async () => {
     const { app } = await appWithAuth();
-    const { token } = await login(app, "member");
+    const { token } = await login(app, "G1");
     const id = await uploadAndWaitReady(app, token, "public");
 
     const unknownVideo = await app.inject({ method: "GET", url: "/mock/videos/does-not-exist/manifest" });
@@ -257,7 +282,7 @@ describe("manifest, playlist, segment inventory, and segment delivery for upload
 
   it("returns 409 for a video that is still processing", async () => {
     const { app } = await appWithAuth();
-    const { token } = await login(app, "member");
+    const { token } = await login(app, "G1");
     const uploadResponse = await uploadFixture(app, token, "sample.mp4", "public");
     const { id } = uploadResponse.json();
 
@@ -272,10 +297,10 @@ describe("manifest, playlist, segment inventory, and segment delivery for upload
     await app.close();
   }, 20_000);
 
-  describe("authorization for members-only uploaded videos", () => {
+  describe("authorization for members-only uploaded videos (Prompt 4 channel/membership model)", () => {
     it("rejects manifest access with no token", async () => {
       const { app } = await appWithAuth();
-      const { token } = await login(app, "member");
+      const { token } = await login(app, "G1");
       const id = await uploadAndWaitReady(app, token, "members");
 
       const response = await app.inject({ method: "GET", url: `/mock/videos/${id}/manifest` });
@@ -284,28 +309,44 @@ describe("manifest, playlist, segment inventory, and segment delivery for upload
       await app.close();
     }, 20_000);
 
-    it("rejects a guest-role token with 403", async () => {
+    it("rejects an authenticated non-member (G2, no membership) with 403", async () => {
       const { app } = await appWithAuth();
-      const { token } = await login(app, "member");
+      const { token } = await login(app, "G1");
       const id = await uploadAndWaitReady(app, token, "members");
 
-      const guest = await login(app, "guest");
+      const g2 = await login(app, "G2");
       const response = await app.inject({
         method: "GET",
         url: `/mock/videos/${id}/manifest`,
-        headers: { authorization: `Bearer ${guest.token}` },
+        headers: { authorization: `Bearer ${g2.token}` },
       });
       expect(response.statusCode).toBe(403);
 
       await app.close();
     }, 20_000);
 
-    it("allows a member-role token for manifest, playlist, inventory, and segments", async () => {
+    it("allows the channel owner (G1) to access their own members-only video without any membership", async () => {
       const { app } = await appWithAuth();
-      const { token } = await login(app, "member");
-      const id = await uploadAndWaitReady(app, token, "members");
+      const g1 = await login(app, "G1");
+      const id = await uploadAndWaitReady(app, g1.token, "members");
 
-      const authHeader = { authorization: `Bearer ${token}` };
+      const authHeader = { authorization: `Bearer ${g1.token}` };
+      const manifest = await app.inject({ method: "GET", url: `/mock/videos/${id}/manifest`, headers: authHeader });
+      expect(manifest.statusCode).toBe(200);
+
+      await app.close();
+    }, 20_000);
+
+    it("allows an authenticated member (G2, active membership) for manifest, playlist, inventory, and segments", async () => {
+      const { app } = await appWithAuth();
+      const g1 = await login(app, "G1");
+      const id = await uploadAndWaitReady(app, g1.token, "members");
+      const channelId = await g1ChannelId(app, g1.token);
+
+      const g2 = await login(app, "G2");
+      const activated = await activateMembership(app, g2.token, channelId);
+      const authHeader = { authorization: `Bearer ${activated.session.token}` };
+
       const manifest = await app.inject({ method: "GET", url: `/mock/videos/${id}/manifest`, headers: authHeader });
       expect(manifest.statusCode).toBe(200);
 
@@ -323,26 +364,26 @@ describe("manifest, playlist, segment inventory, and segment delivery for upload
       await app.close();
     }, 20_000);
 
-    it("knowing a protected video's segment id alone does not grant access — a guest token is still rejected", async () => {
+    it("knowing a protected video's segment id alone does not grant access — a non-member is still rejected", async () => {
       const { app } = await appWithAuth();
-      const { token } = await login(app, "member");
-      const id = await uploadAndWaitReady(app, token, "members");
+      const g1 = await login(app, "G1");
+      const id = await uploadAndWaitReady(app, g1.token, "members");
 
-      // Learn the real segment id as the member (simulating an attacker who saw it once).
+      // Learn the real segment id as the owner (simulating an attacker who saw it once).
       const inventory = await app.inject({
         method: "GET",
         url: `/mock/videos/${id}/segments`,
-        headers: { authorization: `Bearer ${token}` },
+        headers: { authorization: `Bearer ${g1.token}` },
       });
       const segmentId = inventory.json().segments[0].id;
 
-      const guest = await login(app, "guest");
-      const asGuest = await app.inject({
+      const g2 = await login(app, "G2");
+      const asNonMember = await app.inject({
         method: "GET",
         url: `/mock/videos/${id}/segments/${segmentId}`,
-        headers: { authorization: `Bearer ${guest.token}` },
+        headers: { authorization: `Bearer ${g2.token}` },
       });
-      expect(asGuest.statusCode).toBe(403);
+      expect(asNonMember.statusCode).toBe(403);
 
       const noAuth = await app.inject({ method: "GET", url: `/mock/videos/${id}/segments/${segmentId}` });
       expect(noAuth.statusCode).toBe(401);
@@ -352,7 +393,7 @@ describe("manifest, playlist, segment inventory, and segment delivery for upload
 
     it("the segment inventory itself is gated the same way as segment content", async () => {
       const { app } = await appWithAuth();
-      const { token } = await login(app, "member");
+      const { token } = await login(app, "G1");
       const id = await uploadAndWaitReady(app, token, "members");
 
       const response = await app.inject({ method: "GET", url: `/mock/videos/${id}/segments` });
@@ -366,7 +407,7 @@ describe("manifest, playlist, segment inventory, and segment delivery for upload
 describe("DELETE /mock/videos/:id (ownership)", () => {
   it("rejects deletion with no auth token", async () => {
     const { app } = await appWithAuth();
-    const { token } = await login(app, "member");
+    const { token } = await login(app, "G1");
     const uploadResponse = await uploadFixture(app, token, "sample.mp4");
     const { id } = uploadResponse.json();
 
@@ -378,15 +419,15 @@ describe("DELETE /mock/videos/:id (ownership)", () => {
 
   it("rejects deletion by a user who isn't the owner", async () => {
     const { app } = await appWithAuth();
-    const owner = await login(app, "member", "owner-1");
-    const uploadResponse = await uploadFixture(app, owner.token, "sample.mp4");
+    const g1 = await login(app, "G1");
+    const uploadResponse = await uploadFixture(app, g1.token, "sample.mp4");
     const { id } = uploadResponse.json();
 
-    const stranger = await login(app, "member", "stranger-1");
+    const g2 = await login(app, "G2");
     const response = await app.inject({
       method: "DELETE",
       url: `/mock/videos/${id}`,
-      headers: { authorization: `Bearer ${stranger.token}` },
+      headers: { authorization: `Bearer ${g2.token}` },
     });
     expect(response.statusCode).toBe(403);
 
@@ -395,15 +436,15 @@ describe("DELETE /mock/videos/:id (ownership)", () => {
 
   it("allows deletion by the owner and cleans up the store and on-disk files", async () => {
     const { app } = await appWithAuth();
-    const owner = await login(app, "member", "owner-2");
-    const uploadResponse = await uploadFixture(app, owner.token, "sample.mp4");
+    const g1 = await login(app, "G1");
+    const uploadResponse = await uploadFixture(app, g1.token, "sample.mp4");
     const { id } = uploadResponse.json();
     await waitForVideoStatus(app, id);
 
     const deleteResponse = await app.inject({
       method: "DELETE",
       url: `/mock/videos/${id}`,
-      headers: { authorization: `Bearer ${owner.token}` },
+      headers: { authorization: `Bearer ${g1.token}` },
     });
     expect(deleteResponse.statusCode).toBe(204);
 
@@ -419,33 +460,16 @@ describe("DELETE /mock/videos/:id (ownership)", () => {
     await app.close();
   }, 20_000);
 
-  it("allows deletion by an admin even if they're not the owner", async () => {
+  // Note: Prompt 3's global "admin" role no longer exists as a separate override — ownership in
+  // the Prompt 4 model is channel ownership, and a video's owner and its channel's owner are
+  // always the same account (channels are auto-created per uploader). There is intentionally no
+  // separate admin-delete-anything capability in this stage.
+
+  it("refuses to delete a built-in demo video regardless of auth state", async () => {
     const { app } = await appWithAuth();
-    const owner = await login(app, "member", "owner-3");
-    const uploadResponse = await uploadFixture(app, owner.token, "sample.mp4");
-    const { id } = uploadResponse.json();
 
-    const admin = await login(app, "admin");
-    const response = await app.inject({
-      method: "DELETE",
-      url: `/mock/videos/${id}`,
-      headers: { authorization: `Bearer ${admin.token}` },
-    });
-    expect(response.statusCode).toBe(204);
-
-    await app.close();
-  });
-
-  it("refuses to delete a built-in demo video", async () => {
-    const { app } = await appWithAuth();
-    const { token } = await login(app, "admin");
-
-    const response = await app.inject({
-      method: "DELETE",
-      url: "/mock/videos/demo-public",
-      headers: { authorization: `Bearer ${token}` },
-    });
-    expect(response.statusCode).toBe(403);
+    const unauthenticated = await app.inject({ method: "DELETE", url: "/mock/videos/demo-public" });
+    expect(unauthenticated.statusCode).toBe(403);
 
     await app.close();
   });
@@ -454,7 +478,7 @@ describe("DELETE /mock/videos/:id (ownership)", () => {
 describe("path traversal resistance", () => {
   it("rejects a segment id containing a traversal sequence", async () => {
     const { app } = await appWithAuth();
-    const { token } = await login(app, "member");
+    const { token } = await login(app, "G1");
     const uploadResponse = await uploadFixture(app, token, "sample.mp4");
     const { id } = uploadResponse.json();
     await waitForVideoStatus(app, id);
@@ -470,7 +494,7 @@ describe("path traversal resistance", () => {
 
   it("never includes a filesystem path in any API response", async () => {
     const { app } = await appWithAuth();
-    const { token } = await login(app, "member");
+    const { token } = await login(app, "G1");
     const uploadResponse = await uploadFixture(app, token, "sample.mp4");
     const { id } = uploadResponse.json();
     const { body } = await waitForVideoStatus(app, id);

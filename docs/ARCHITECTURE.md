@@ -16,8 +16,11 @@
 ├─ apps/
 │  ├─ web/          Next.js 14 (App Router) dashboard — dark/hacker-style UI
 │  ├─ api/          Fastify backend — analysis orchestration, findings, auth/session concerns
-│  └─ mock-lab/      Fastify mock streaming server + synthetic auth + video upload/HLS chunking
-│                     pipeline (src/video/), used only for local security tests
+│  └─ mock-lab/      Fastify mock streaming server. src/auth/ = Prompt 1's legacy role-token gate
+│                     (still used for the two static demo videos only); src/video/ = Prompt 3's
+│                     upload/HLS chunking pipeline; src/account/ = Prompt 4's real accounts,
+│                     channels, memberships, sessions, and audit log; src/securityTests/ = Prompt
+│                     4's isolated test-fixture runner
 ├─ packages/
 │  └─ security/      Shared, framework-agnostic SSRF/URL-safety guard + IP-pinned safeFetch
 │                     (consumed by apps/api's URL Analysis Engine and manifest-by-URL parsing)
@@ -41,6 +44,8 @@ without publishing anything or duplicating code.
 | Mock lab | A second, separate Fastify service | Keeping it a distinct process (own port, own package) means "the thing under test" is never the same process as "the thing running the tests" — mirroring a real client/server security boundary, which matters for the access-control demos in Prompt 4. |
 | Video upload | `@fastify/multipart` | A HAR capture is JSON and could ride the existing JSON-body convention (Prompt 2); a video file genuinely isn't — this is the one place in the repo an actual file-upload plugin is warranted. |
 | Video transcoding | FFmpeg/ffprobe via `node:child_process.spawn` (argv array) | The project vision calls for FFmpeg explicitly. `spawn` with an argv array (never a shell string via `exec`) means no filename or option value can be interpreted as shell syntax — there is no injection surface to defend, by construction. |
+| Sessions | Opaque random token (`crypto.randomBytes`), hash-only persisted, `@fastify/cookie` for the httpOnly cookie | Prompt 4 needs genuine server-side revocation and expiration, which a stateless signed JWT (Prompt 1's `SyntheticAuth`) structurally cannot provide without a blocklist — at which point you have a session store anyway, so this *is* that store, built directly rather than layered on top of JWTs. |
+| CSRF | Hand-rolled double-submit cookie (no library) | The mechanism is ~15 lines (compare an `X-CSRF-Token` header to a readable cookie) and only applies to the cookie-auth path at all — not worth a dependency. |
 | Logging | Pino (+ pino-pretty in dev) | Structured logs with field-level redaction (`redact.paths`) are the simplest reliable way to guarantee secrets never reach disk. |
 | Testing | Vitest (unit), Playwright (planned) | Vitest is fast and has first-class ESM/TS support with minimal config; Playwright is deferred to Prompt 5, which is where the roadmap places integration/E2E coverage. |
 | Database (planned) | PostgreSQL + Prisma | Not introduced yet — the Prompt 1 skeleton only needs a findings list, served from a JSON file. Prisma/Postgres get introduced in Prompt 4 when test results need to be structured and queryable (test runs, expected-vs-actual outcomes, severities). |
@@ -116,6 +121,66 @@ Browser polls GET /mock/videos/:id until status is "ready"/"failed", then:
                                               supports Range: 200 full / 206 partial / 416 unsatisfiable)
 ```
 
+```
+Browser (apps/web)
+   │  POST /mock/session/login { accountLabel: "G1" | "G2" }
+   ▼
+apps/mock-lab/src/routes/session.ts
+   │  UserStore.findByLabel() — 401 if unknown
+   │  revoke any session already presented on this request (rotation-on-login)
+   │  SessionStore.create(userId) → opaque token; only tokenHash = sha256(token) is ever stored
+   │  set-cookie: mocklab_session (httpOnly) + mocklab_csrf (readable), both SameSite=Lax
+   ▼
+200 { token, csrfToken, user, expiresAt }   ← token/csrfToken also returned in the body for the
+                                               dashboard's cross-origin bearer-auth use (see
+                                               docs/SECURITY_MODEL.md)
+
+Browser (apps/web)
+   │  GET /mock/videos/:id/manifest   (Authorization: Bearer <token>  — or the httpOnly cookie)
+   ▼
+account/authorization.ts#authorizeVideoResourceAccess(request, video, ctx)
+   │  video.visibility === "public"           → allow, no session needed
+   │  resolveActor() — session missing/invalid/expired/revoked → 401, audit "authz.denied"
+   │  channel.ownerUserId === session.userId   → allow (owner), audit "authz.granted"
+   │  MembershipStore lookup, isMembershipEffectivelyActive()
+   │      (status==="active" && !revokedAt && expiresAt > now)
+   │                                            → allow (member), audit "authz.granted"
+   │  else                                      → 403, audit "authz.denied"
+   ▼
+200 (serve manifest) | 401 | 403   — the *same* check runs again, independently, for
+                                      playlist.m3u8, the segment inventory, and every
+                                      individual segment request
+
+Browser (apps/web)
+   │  POST /mock/channels/:id/membership/checkout { simulateOutcome: "success" | "failure" }
+   ▼
+apps/mock-lab/src/routes/membership.ts
+   │  PaymentStore.create({ ..., note: "SIMULATED TEST PAYMENT — not a real financial transaction" })
+   ├─ "failure" → 402, no Membership created/touched
+   └─ "success" → Membership upserted to status "active", expiresAt = now + MOCK_LAB_MEMBERSHIP_DURATION_SECONDS
+                  → SessionStore.rotate() (privilege change) → new token/cookies issued, old one revoked
+                  → audit "membership.activated" + "session.rotated"
+```
+
+```
+Dashboard "run security tests" / POST /mock/security-tests/run
+   ▼
+securityTests/runner.ts#runSecurityTests()
+   │  securityTests/fixtures.ts#buildSecurityTestFixtures()
+   │    → buildMockLabApp() against a fresh os.tmpdir() directory (NEVER the real server's data)
+   │    → seeds G1/G2 (auto, same seed as the real app) + a third throwaway "outsider" account
+   │    → uploads + waits for 3 real FFmpeg-processed videos: G1 public, G1 members-only,
+   │      outsider's members-only (for cross-channel tests) — sequentially, not concurrently
+   │      (see "a real bug this caught" in docs/SECURITY_MODEL.md)
+   │  runs all 19 case functions via app.inject() against that isolated app
+   │  tears down: app.close() + rm -rf the temp directory
+   ▼
+SecurityTestResultsStore.record(run) — persisted in the REAL server's data dir
+audit.record({ type: "security_test.run", detail: "<passed>/<total> passed, ..." })
+   ▼
+200 { id, startedAt, completedAt, results: [...], summary }
+```
+
 ## Module boundaries and reuse across stages
 
 - `packages/security` owns *all* SSRF/allowlist decisions, now including the actual fetch: its
@@ -132,36 +197,52 @@ Browser polls GET /mock/videos/:id until status is "ready"/"failed", then:
   the existing `findingsStore.ts` — all sharing the one Fastify instance, logger, and env config.
   The Security Test Engine (Prompt 4) will be another route group here, not a new service.
   (One intentional exception: the mock streaming/auth lab stays its own process — see above.)
-- `apps/mock-lab` owns every piece of "local, synthetic, safe-to-attack" infrastructure: role
-  tokens, manifests, segments, and — as of this stage — real uploaded-and-transcoded test videos
-  (`src/video/`). The Prompt 1 static demo fixtures (`data/videoRegistry.ts`) and the dynamic,
-  uploaded-video store (`video/videoStore.ts`) are deliberately two separate registries behind one
-  shared authorization gate (`auth/accessControl.ts`'s `AccessPolicyTarget`, a minimal
-  `{ membersOnly: boolean }` shape both satisfy) rather than one merged model — the static fixtures
-  use placeholder text as segment "content" (never real media) and exist purely so Prompt 1's
-  access-control tests have something stable to assert against; real video playback only ever
-  touches the dynamic store. The Prompt 4 Security Test Engine is a *client* of this service — it
-  issues logins, makes requests, and records expected-vs-actual outcomes — it does not reimplement
-  the lab's auth logic.
+- `apps/mock-lab` owns every piece of "local, synthetic, safe-to-attack" infrastructure, and as of
+  this stage contains **two deliberately separate authorization systems, not one merged model**:
+  - `src/auth/` (Prompt 1, untouched): `SyntheticAuth`'s stateless role-JWT + `authorizeVideoAccess()`,
+    gating *only* the two static demo fixtures in `data/videoRegistry.ts`. These exist purely so
+    Prompt 1's original access-control tests have something stable to assert against forever —
+    their segment "content" is placeholder text, never real media, and was never meant to be
+    played back by a real HLS player.
+  - `src/account/` (Prompt 4): real `User`/`Channel`/`MembershipPlan`/`Membership`/`Session`/
+    `AuditEvent` entities and `authorization.ts#authorizeVideoResourceAccess()`, gating every real,
+    FFmpeg-processed, uploaded video (`src/video/`). `VideoRecord` now carries a `channelId`, and
+    `POST /mock/videos` requires a Prompt 4 session — uploads are authenticated by real account
+    identity, not a role token, precisely so membership can be checked per-channel.
+
+  The Prompt 4 Security Testing Engine (`src/securityTests/`) is a *client* of this second system —
+  it builds its own isolated fixture app, issues real logins, makes real requests, and records
+  expected-vs-actual outcomes; it does not reimplement any auth logic, and it never touches the
+  live server's actual data directory.
 - `apps/web` owns presentation only. It talks to `apps/api` and `apps/mock-lab` over HTTP exactly
   the way any external client would; it holds no business logic of its own.
 
 ## What's deliberately not built yet
 
-- No database/ORM — analysis history, findings, and the video registry are all JSON files on disk.
-  Introduced when the Security Test Engine needs structured, queryable results (Prompt 4); existing
-  `FindingsStore`/`AnalysisStore`/`VideoStore` call sites get migrated then, not duplicated.
+- No database/ORM — every entity (findings, analysis history, videos, users, channels,
+  memberships, sessions, audit events) is a JSON file on disk, now serialized through an
+  in-process write queue (see "a real bug this caught" in docs/SECURITY_MODEL.md) rather than a
+  real transactional store. Introduced in Prompt 5 if the Findings/Reporting stage needs
+  structured, queryable results; existing store call sites get migrated then, not duplicated.
 - No job queue — URL analysis, HAR import, and manifest parsing run synchronously within a single
   request/response; video *upload* responds immediately (`202`) and processing runs in a detached
   background `Promise` within the same process, which is enough for a local single-user tool.
   Redis/BullMQ is introduced only if/when that stops being enough — not assumed in advance.
 - No multi-bitrate ABR ladder — every uploaded video produces exactly one HLS rendition (one master
   playlist wrapping one media playlist). The master/media/segment *structure* required by the
-  project vision is real; multiple quality levels per video is a Prompt 4+ enhancement if ever
-  needed, not a missing piece of this stage's scope.
+  project vision is real; multiple quality levels per video is a future enhancement if ever needed,
+  not a missing piece of this stage's scope.
 - No streaming-to-disk upload — `@fastify/multipart`'s `part.toBuffer()` buffers the whole file in
   memory before writing it, bounded by `MOCK_LAB_MAX_UPLOAD_BYTES`. Acceptable for a local research
   tool's upload sizes; a true streaming write would be needed before this handled large files at
   scale.
+- No per-video entitlement — a membership grants access to every `members`-visibility video on a
+  channel, not individually priced videos. The data model (`MembershipPlan` is channel-scoped) is
+  the limiting factor, not the authorization function, which already checks per-video `channelId`.
+- No signed, independently-expirable resource grants — every manifest/playlist/segment request is
+  authorized directly against live session + membership state, every time. This is simpler and, for
+  this project's threat model, strictly stronger than a grant that could itself go stale
+  independently of the session it was derived from; see the Security Testing Engine's `STREAM-03`/
+  `STREAM-04` `not_applicable` results in docs/SECURITY_MODEL.md for the reasoning spelled out.
 - No CI beyond a basic install/build/test workflow (now also installing FFmpeg) — expanded as new
   workspaces gain real build steps (e.g., Next.js production build, Playwright) in later prompts.

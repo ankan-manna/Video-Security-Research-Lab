@@ -12,6 +12,8 @@ export interface SegmentInfo {
 export interface VideoRecord {
   id: string;
   ownerId: string;
+  /** The channel (account/types.ts's Channel) this video belongs to — Prompt 4's membership checks are per-channel. */
+  channelId: string;
   originalFilename: string;
   sourceFormat: "mp4" | "webm";
   visibility: VideoVisibility;

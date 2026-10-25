@@ -2,11 +2,12 @@ import path from "node:path";
 import { promises as fs } from "node:fs";
 import { randomUUID } from "node:crypto";
 import type { FastifyInstance } from "fastify";
-import type { SyntheticAuth } from "../auth/syntheticAuth.js";
-import { authorizeVideoAccess, identifyRequester } from "../auth/accessControl.js";
+import type { AccountContext } from "../account/context.js";
+import { resolveActor } from "../account/sessionAuth.js";
+import { authorizeVideoResourceAccess } from "../account/authorization.js";
 import { mockVideos } from "../data/videoRegistry.js";
 import type { VideoStore } from "../video/videoStore.js";
-import { isMembersOnly, toSummary, type VideoRecord, type VideoVisibility } from "../video/types.js";
+import { toSummary, type VideoRecord, type VideoVisibility } from "../video/types.js";
 import { detectVideoFormat } from "../video/formatDetection.js";
 import { videoDir } from "../video/paths.js";
 import { buildMediaPlaylist } from "../video/playlistBuilder.js";
@@ -22,20 +23,29 @@ function sanitizeDisplayFilename(filename: string | undefined): string {
   return path.basename(filename).slice(0, 200) || "upload";
 }
 
+/**
+ * Real uploaded videos are gated by the Prompt 4 account/channel/
+ * membership system — see account/authorization.ts. The two Prompt 1
+ * static demo fixtures keep using the original role-token gate untouched
+ * (see routes/manifest.ts and routes/segments.ts, which still special-case
+ * them); this file only ever deals with the dynamic VideoStore.
+ */
 export async function videosRoutes(
   app: FastifyInstance,
-  auth: SyntheticAuth,
   videoStore: VideoStore,
   config: VideosRoutesConfig,
+  ctx: AccountContext,
 ) {
   app.post("/mock/videos", async (request, reply) => {
-    const identity = identifyRequester(request, auth);
-    if (!identity || !identity.ok) {
+    const { resolution } = await resolveActor(request, ctx.sessionStore);
+    if (resolution.kind !== "ok") {
       return reply.status(401).send({
         error: "unauthenticated",
-        message: "A valid bearer session token is required to upload a video.",
+        message: `A valid session is required to upload a video (session ${resolution.kind}).`,
       });
     }
+    const userId = resolution.session.userId;
+    const user = await ctx.userStore.get(userId);
 
     let fileBuffer: Buffer | null = null;
     let originalFilename = "upload";
@@ -80,6 +90,8 @@ export async function videosRoutes(
       });
     }
 
+    const channel = await ctx.channelStore.findOrCreateForOwner(userId, user?.displayName ?? "Creator");
+
     const id = randomUUID();
     const dir = videoDir(config.dataDir, id);
     await fs.mkdir(dir, { recursive: true });
@@ -88,7 +100,8 @@ export async function videosRoutes(
     const now = new Date().toISOString();
     const record: VideoRecord = {
       id,
-      ownerId: identity.payload.sub,
+      ownerId: userId,
+      channelId: channel.id,
       originalFilename: sanitizeDisplayFilename(originalFilename),
       sourceFormat: format,
       visibility,
@@ -136,11 +149,11 @@ export async function videosRoutes(
       return reply.status(403).send({ error: "forbidden", message: "Built-in demo videos cannot be deleted." });
     }
 
-    const identity = identifyRequester(request, auth);
-    if (!identity || !identity.ok) {
+    const { resolution } = await resolveActor(request, ctx.sessionStore);
+    if (resolution.kind !== "ok") {
       return reply.status(401).send({
         error: "unauthenticated",
-        message: "A valid bearer session token is required to delete a video.",
+        message: `A valid session is required to delete a video (session ${resolution.kind}).`,
       });
     }
 
@@ -149,12 +162,13 @@ export async function videosRoutes(
       return reply.status(404).send({ error: "not_found", message: `No video "${id}".` });
     }
 
-    const isOwner = identity.payload.sub === video.ownerId;
-    const isAdmin = identity.payload.role === "admin";
-    if (!isOwner && !isAdmin) {
+    const userId = resolution.session.userId;
+    const channel = await ctx.channelStore.get(video.channelId);
+    const isOwner = userId === video.ownerId || (channel !== null && channel.ownerUserId === userId);
+    if (!isOwner) {
       return reply
         .status(403)
-        .send({ error: "forbidden", message: "Only the video's owner (or an admin) can delete it." });
+        .send({ error: "forbidden", message: "Only the video's owner (or its channel owner) can delete it." });
     }
 
     await videoStore.remove(id);
@@ -170,8 +184,10 @@ export async function videosRoutes(
       return reply.status(404).send({ error: "not_found", message: `No video "${id}".` });
     }
 
-    const denied = authorizeVideoAccess(request, { membersOnly: isMembersOnly(video) }, auth);
-    if (denied) return reply.status(denied.status).send(denied.body);
+    const decision = await authorizeVideoResourceAccess(request, video, ctx);
+    if (!decision.allow) {
+      return reply.status(decision.status).send({ error: decision.code, message: decision.message });
+    }
 
     if (video.status !== "ready") {
       return reply.status(409).send({
@@ -185,7 +201,7 @@ export async function videosRoutes(
 
     const playlist = buildMediaPlaylist({ segments: video.segments, segmentUriPrefix: "segments/" });
     reply.header("Content-Type", "application/vnd.apple.mpegurl");
-    reply.header("Cache-Control", isMembersOnly(video) ? "no-store" : "public, max-age=3600");
+    reply.header("Cache-Control", video.visibility === "members" ? "no-store" : "public, max-age=3600");
     return reply.send(playlist);
   });
 
@@ -196,8 +212,10 @@ export async function videosRoutes(
       return reply.status(404).send({ error: "not_found", message: `No video "${id}".` });
     }
 
-    const denied = authorizeVideoAccess(request, { membersOnly: isMembersOnly(video) }, auth);
-    if (denied) return reply.status(denied.status).send(denied.body);
+    const decision = await authorizeVideoResourceAccess(request, video, ctx);
+    if (!decision.allow) {
+      return reply.status(decision.status).send({ error: decision.code, message: decision.message });
+    }
 
     return reply.send({ segments: video.segments });
   });

@@ -6,12 +6,16 @@ import { UrlForm } from "@/components/UrlForm";
 import { AnalysisHistory } from "@/components/AnalysisHistory";
 import { HarUpload } from "@/components/HarUpload";
 import { ManifestInspector } from "@/components/ManifestInspector";
-import { MockLabSessionProvider } from "@/lib/mockLabSession";
-import { MockLabSessionBar } from "@/components/MockLabSessionBar";
+import { AccountSessionProvider } from "@/lib/accountSession";
+import { AccountSessionBar } from "@/components/AccountSessionBar";
 import { VideoUpload } from "@/components/VideoUpload";
 import { VideoLibrary } from "@/components/VideoLibrary";
 import { VideoPlayer } from "@/components/VideoPlayer";
 import { SegmentInventory } from "@/components/SegmentInventory";
+import { CreatorPanel } from "@/components/CreatorPanel";
+import { MembershipPanel } from "@/components/MembershipPanel";
+import { SecurityTestRunner } from "@/components/SecurityTestRunner";
+import { SessionInspector } from "@/components/SessionInspector";
 
 export default function DashboardPage() {
   const [historyRefreshKey, setHistoryRefreshKey] = useState(0);
@@ -50,12 +54,16 @@ export default function DashboardPage() {
       </section>
 
       <h2 className="mb-3 mt-10 border-b border-lab-border pb-2 text-[11px] uppercase tracking-widest text-neutral-500">
-        Local Video Chunking &amp; Streaming Lab
+        Local Video Chunking, Membership &amp; Security Testing Lab
       </h2>
 
-      <MockLabSessionProvider>
+      <AccountSessionProvider>
         <div className="space-y-6">
-          <MockLabSessionBar />
+          <section className="grid gap-6 md:grid-cols-2">
+            <AccountSessionBar />
+            <SessionInspector />
+          </section>
+
           <VideoUpload onReady={() => setLibraryRefreshKey((key) => key + 1)} />
 
           <section className="grid gap-6 md:grid-cols-2">
@@ -72,11 +80,18 @@ export default function DashboardPage() {
           </section>
 
           <VideoPlayer videoId={selectedVideoId} />
+
+          <section className="grid gap-6 md:grid-cols-2">
+            <CreatorPanel />
+            <MembershipPanel />
+          </section>
+
+          <SecurityTestRunner />
         </div>
-      </MockLabSessionProvider>
+      </AccountSessionProvider>
 
       <footer className="mt-10 border-t border-lab-border pt-4 text-[11px] text-neutral-600">
-        Stage 3 of 5 — local video chunking, HLS streaming, and range-request delivery. See
+        Stage 4 of 5 — membership authorization and the security testing engine. See
         docs/ROADMAP.md for what&apos;s next.
       </footer>
     </main>

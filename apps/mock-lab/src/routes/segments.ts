@@ -3,9 +3,10 @@ import type { SyntheticAuth } from "../auth/syntheticAuth.js";
 import { authorizeVideoAccess } from "../auth/accessControl.js";
 import { mockVideos } from "../data/videoRegistry.js";
 import type { VideoStore } from "../video/videoStore.js";
-import { isMembersOnly } from "../video/types.js";
 import { isSafePathSegment, resolveSafePath, videoHlsDir } from "../video/paths.js";
 import { sendFileWithRangeSupport } from "../video/rangeDelivery.js";
+import type { AccountContext } from "../account/context.js";
+import { authorizeVideoResourceAccess } from "../account/authorization.js";
 
 export interface SegmentsRoutesConfig {
   dataDir: string;
@@ -16,6 +17,7 @@ export async function segmentsRoutes(
   auth: SyntheticAuth,
   videoStore: VideoStore,
   config: SegmentsRoutesConfig,
+  ctx: AccountContext,
 ) {
   app.get("/mock/videos/:id/segments/:segmentId", async (request, reply) => {
     const { id, segmentId } = request.params as { id: string; segmentId: string };
@@ -43,9 +45,12 @@ export async function segmentsRoutes(
 
     // Knowing a segment id alone must never be sufficient: this check runs
     // independently of (and before) the manifest/playlist routes, exactly
-    // like the static-video path above already did for Prompt 1's demos.
-    const denied = authorizeVideoAccess(request, { membersOnly: isMembersOnly(video) }, auth);
-    if (denied) return reply.status(denied.status).send(denied.body);
+    // like the static-video path above already did for Prompt 1's demos —
+    // now backed by the Prompt 4 account/channel/membership policy.
+    const decision = await authorizeVideoResourceAccess(request, video, ctx);
+    if (!decision.allow) {
+      return reply.status(decision.status).send({ error: decision.code, message: decision.message });
+    }
 
     if (video.status !== "ready") {
       return reply.status(409).send({
@@ -57,6 +62,9 @@ export async function segmentsRoutes(
       });
     }
 
+    // The resource must belong to THIS video specifically — a segment id that happens to be
+    // valid for some other video is never accepted here, even if the requester is otherwise
+    // fully authorized for this video.
     const segmentExists = video.segments.some((segment) => segment.id === segmentId);
     if (!segmentExists || !isSafePathSegment(segmentId)) {
       return reply
@@ -73,7 +81,7 @@ export async function segmentsRoutes(
 
     await sendFileWithRangeSupport(request, reply, filePath, {
       contentType: "video/mp2t",
-      cacheControl: isMembersOnly(video) ? "no-store" : "public, max-age=3600",
+      cacheControl: video.visibility === "members" ? "no-store" : "public, max-age=3600",
     });
   });
 }

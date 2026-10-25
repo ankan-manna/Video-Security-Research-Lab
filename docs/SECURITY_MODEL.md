@@ -27,10 +27,16 @@ from the project vision is actually enforced in code today vs. planned for a lat
    reference *exists* (method, scheme, presence) and stops there. No decryption, no DRM license
    interaction, ever.
 6. **The local streaming lab only ever transcodes and serves the user's own uploaded test videos.**
-   `apps/mock-lab`'s video pipeline (added this stage) never fetches video from a URL, never
-   touches YouTube or any other real platform, and never reconstructs anything from a HAR capture
-   or manifest analysis. Its only input is a file the user directly uploaded through
-   `POST /mock/videos`.
+   `apps/mock-lab`'s video pipeline never fetches video from a URL, never touches YouTube or any
+   other real platform, and never reconstructs anything from a HAR capture or manifest analysis.
+   Its only input is a file the user directly uploaded through `POST /mock/videos`.
+7. **The membership/payment flow is a clearly-labeled simulation, never presented as real.**
+   `POST /mock/channels/:id/membership/checkout` takes an explicit `simulateOutcome` parameter —
+   there is no payment processor behind it, no money moves, and every resulting
+   `SimulatedPayment` record carries the literal, unconditional marker
+   `"SIMULATED TEST PAYMENT — not a real financial transaction"`. Membership is only ever created
+   or activated as a direct result of this test flow succeeding — never implicitly, never as a
+   side effect of any other action.
 
 ## SSRF defense (`packages/security`)
 
@@ -121,30 +127,189 @@ extraction, and persistence.
 appropriate for a single-instance research/demo deployment; a multi-instance deployment would need
 a shared store (e.g., Redis), noted here rather than built now since it isn't needed yet.
 
-## Mock lab authentication model (`apps/mock-lab`)
+## Two authorization systems, on purpose (`apps/mock-lab`)
 
-The mock lab exists purely so the Security Test Engine (Prompt 4) has something safe to attack.
+`apps/mock-lab` contains two separate, never-merged authorization systems:
 
-- `POST /mock/auth/login { role }` issues a short-lived (default 15 minutes) HMAC-signed token for
-  a chosen role (`guest`, `member`, `admin`). There is no username/password step — picking a role
-  is the entire "login," by design, since the point is to demonstrate authorization logic, not to
-  simulate a real identity system.
-- `GET /mock/videos/:id/manifest` and `GET /mock/videos/:id/segments/:segmentId` are open for
-  public videos and require a valid, non-expired token with `member` or `admin` role for
-  members-only videos. Missing token → `401`; expired or malformed token → `401`; wrong role →
-  `403`; unknown video or segment id → `404`.
-- This already demonstrates the four access-control cases the project vision calls out for the
-  Security Test Engine: unauthenticated access, expired sessions, role-based authorization, and
-  unauthorized segment requests (see `apps/mock-lab/test/auth-and-access.test.ts`). As of this
-  stage, the same four cases are also exercised against real uploaded videos (see
-  `apps/mock-lab/test/videos-upload-and-streaming.test.ts`'s "authorization for members-only
-  uploaded videos" suite) through the exact same `authorizeVideoAccess()` gate. Prompt 4 adds the
-  *orchestration* on top: running these as named test cases, recording expected vs. actual
-  outcomes, and surfacing them as findings. Real IDOR scenarios are closer now than in Prompt 1 —
-  uploaded video ids are `randomUUID()`s (not enumerable), but segment ids *are* predictable
-  (`segment-000.ts`, `segment-001.ts`, ...), which is exactly the shape Prompt 4's IDOR test cases
-  need and exactly why the authorization re-check on every segment request (not just the manifest)
-  matters.
+- **Legacy role gate** (`src/auth/`, Prompt 1, byte-for-byte unchanged): `POST /mock/auth/login
+  { role }` issues a short-lived HMAC-signed token for `guest`/`member`/`admin`. No username or
+  password — picking a role is the entire "login." Gates *only* the two static demo videos in
+  `data/videoRegistry.ts`, which exist purely so Prompt 1's original access-control tests
+  (`apps/mock-lab/test/auth-and-access.test.ts`) have something stable to assert against forever.
+- **Real account system** (`src/account/`, this stage): described in detail below. Gates every
+  real, FFmpeg-processed uploaded video.
+
+Both demonstrate the same four access-control cases the project vision calls out — unauthenticated
+access, expired sessions, role/membership-based authorization, and unauthorized segment requests —
+and both independently re-check authorization on every content-bearing request (manifest, media
+playlist, segment inventory, individual segment), so a segment id alone is never sufficient for
+access in either system.
+
+## Account, session, and membership model (`apps/mock-lab/src/account/`)
+
+### Entities
+
+`User` (two seeded fixtures: G1 — Creator, G2 — Member, no password) → `Channel` (one per
+uploader, auto-created lazily) → `MembershipPlan` (channel-scoped, priced in integer minor units —
+₹1.00 = 100) → `Membership` (user × channel × plan, with `active`/`expired`/`revoked`/
+`payment_failed` status, `activatedAt`/`expiresAt`/`revokedAt`) → `SimulatedPayment` (always
+carrying the literal non-real-transaction marker — see "non-negotiable boundaries" above).
+`isMembershipEffectivelyActive()` is the single definition of "active" every check uses:
+`status === "active" && !revokedAt && expiresAt > now` — a `Membership` row existing is not by
+itself sufficient.
+
+### Sessions: why a real store instead of another JWT
+
+Prompt 1's `SyntheticAuth` is a stateless, self-verifying JWT — by construction, nothing stateless
+can be *revoked* before its signature's own expiry without an additional blocklist, at which point
+you have a session store anyway. Prompt 4 needs genuine revocation (logout, membership-driven
+rotation) and genuine expiration tracking, so `account/sessionStore.ts` builds that store directly:
+
+- `generateSessionToken()` — 32 random bytes (`crypto.randomBytes`), base64url-encoded. This raw
+  value is shown to the client exactly once, at login.
+- Only `hashSessionToken(token)` (SHA-256 hex) is ever persisted. Reading `sessions.json` directly
+  — or a leaked backup of it — does not yield a usable token, the same reasoning as hashing a
+  password.
+- `resolve(rawToken)` returns a discriminated `{ kind: "ok" | "none" | "invalid" | "expired" | "revoked" }`
+  — every route handles all five outcomes explicitly rather than treating "not ok" as one bucket,
+  which is what makes "safe handling of missing, malformed, expired, and revoked sessions" an
+  actual per-case guarantee instead of a blanket catch.
+- `rotate(oldTokenHash, userId)` revokes the old session and issues a new one atomically. Called
+  after login (if a session was already presented) and after membership activation (a privilege
+  change) — `apps/mock-lab/test/account/membership.test.ts`'s "rotates the session after
+  activation" test asserts the *old* token stops working in the same call that proves the new one
+  works.
+
+### Cookie + bearer dual authentication, and what it means for CSRF
+
+Login sets two cookies — `mocklab_session` (httpOnly, `SameSite=Lax`, `Secure` when
+`NODE_ENV=production`) and `mocklab_csrf` (readable by JS, same attributes otherwise) — and also
+returns the raw token and CSRF token in the JSON body. Both exist because `apps/web` (port 3000)
+and `apps/mock-lab` (port 4002) are different origins in local dev; a `SameSite=Lax` cookie is not
+reliably sent on the cross-origin `fetch`/XHR calls the dashboard and `hls.js` player actually make
+(Lax only covers top-level navigations). The dashboard therefore authenticates with the bearer
+token — the same pattern established in Prompt 1 — while the cookie mechanism is fully implemented
+and independently testable (directly against the mock-lab origin, e.g. via curl or
+`apps/mock-lab/test/account/session.test.ts`'s cookie-based tests, which set real cookies on
+`app.inject()` and assert the full flow).
+
+This has a direct, correct consequence for CSRF: **a request authenticated via the `Authorization`
+header is immune to CSRF by construction** — a malicious page cannot make the victim's browser send
+a custom header it doesn't know the value of. CSRF only matters for the cookie path, where the
+browser attaches credentials *automatically*. `requireCsrfIfCookieAuth()` therefore does exactly
+one thing: if (and only if) the request resolved its session via the cookie, it requires an
+`X-CSRF-Token` header matching the `mocklab_csrf` cookie's value (double-submit); bearer-
+authenticated requests skip the check entirely, correctly. Applied to every state-changing
+cookie-reachable endpoint: logout, plan updates, membership checkout, member revocation.
+`apps/mock-lab/test/account/session.test.ts` proves both halves: a cookie-authenticated logout
+with no/wrong CSRF header is rejected (`403 csrf_failed`), the identical logout with a matching
+header succeeds, and the bearer-authenticated equivalent succeeds with no CSRF header at all.
+
+### Centralized authorization: `authorizeVideoResourceAccess()`
+
+`account/authorization.ts` is the **one** function every protected video route (manifest, media
+playlist, segment inventory, individual segment) calls, implementing every check the project
+vision lists in order:
+
+1. Visibility `"public"` → allow immediately, no session needed.
+2. Resolve the session (cookie or bearer) — any non-`"ok"` resolution → `401`, with an
+   `authz.denied` audit event.
+3. Look up the video's channel; requester is the channel owner → allow (`reason: "owner"`).
+4. Else look up the requester's membership for that specific `channelId` and check
+   `isMembershipEffectivelyActive()` → allow (`reason: "active_membership"`) or `403`.
+5. (Caller's responsibility, checked before this function runs at all: the video exists, and —
+   for segment requests specifically — the requested segment id is one of *this* video's own
+   segments, never another video's.)
+
+Every one of these checks is re-derived from server-side state on every single call — frontend
+state, a previously issued token, or a guessed/observed id are never treated as proof of anything.
+`apps/mock-lab/test/videos-upload-and-streaming.test.ts` and the Security Testing Engine's
+`AUTHZ-*`/`STREAM-*` cases exercise this directly, including the specific property that knowing a
+protected video's real segment id (e.g. by observing an authorized session's own traffic) is not
+sufficient without a valid, correctly-scoped session of your own.
+
+## Audit trail (`apps/mock-lab/src/account/auditStore.ts`)
+
+Every authentication attempt, logout, membership activation/payment-failure/revocation, and
+authorization grant/denial is recorded as a structured, timestamped `AuditEvent` — JSON-file-backed
+(same pattern as every other store here), capped at `MOCK_LAB_AUDIT_MAX_ENTRIES` (default 2000,
+oldest dropped first).
+
+- **No secrets, structurally, not by convention.** `AuditStore.record()` takes typed fields
+  (`actorUserId`, `actorSessionFingerprint`, `channelId`, `videoId`, `outcome`, `detail`) — there
+  is no free-form "extra data" bag a raw token or payment detail could accidentally end up in.
+  `actorSessionFingerprint` is `sessionFingerprint(tokenHash)` — the first 12 hex characters of an
+  already-irreversible SHA-256 hash — enough to correlate events to the same session across a
+  timeline, never enough to reconstruct anything usable.
+  `apps/mock-lab/test/account/audit.test.ts`'s "never stores a raw session token..." test asserts
+  this against the actual on-disk `audit.json` file, not just the API response.
+- **Access control**: `GET /mock/channels/:id/audit` is restricted to that channel's owner —
+  `401` with no session, `403` for anyone else, `200` only for the owner.
+- **Retention**: capped and newest-first by construction (`appendCapped`), rather than growing
+  without bound.
+- **Deliberately not logged per-segment**: manifest/playlist access is audited
+  (`resource.access`-shaped via the `authz.granted`/`authz.denied` events on those routes), but
+  *individual segment* fetches during normal playback are not separately audited beyond their own
+  grant/denial check — an HLS playback session can touch dozens of segments, and logging each
+  successful one would drown the signal (denials) in noise without adding security value; this is
+  a deliberate signal-to-noise choice, not an oversight.
+
+## Security Testing Engine (`apps/mock-lab/src/securityTests/`)
+
+A runtime test runner, triggerable from the dashboard (`POST /mock/security-tests/run`) or
+directly (`runSecurityTests()`), distinct from (though exercising the same underlying code as) the
+`npm test` Vitest suite covering CI/regression.
+
+### Isolation
+
+`securityTests/fixtures.ts#buildSecurityTestFixtures()` builds a **complete second instance** of
+the mock-lab app — `buildMockLabApp()` pointed at a fresh `os.tmpdir()` directory — seeds G1/G2
+(the same idempotent seed the real server runs), uploads and waits for three real,
+FFmpeg-transcoded videos (G1 public, G1 members-only, and a throwaway third account's
+members-only video on an unrelated channel, for cross-channel tests), runs every test case against
+that isolated app via `app.inject()`, then calls `app.close()` and deletes the temp directory.
+**Nothing here ever touches the live server's actual data directory** —
+`apps/mock-lab/test/securityTests/runner.test.ts`'s "leaves no trace in any real server's data
+directory" test asserts the real dataDir's contents are byte-for-byte unchanged by a run.
+
+### Honesty: pass, fail, or `not_applicable` — never a fabricated pass
+
+Every `TestCaseResult` records the real HTTP status code and body observed from an actual request
+— `apps/mock-lab/test/securityTests/runner.test.ts`'s "never marks a test passed without it
+actually having been executed" test asserts `actualStatusCode` is non-null for every `pass`/`fail`
+result. The two test cases the project vision describes as conditional — "if the implementation
+uses signed grants" — are reported `not_applicable` with an explicit, specific reason (this
+implementation authorizes every request directly against live session+membership state, with no
+separate signed-grant object that could itself expire or be scoped independently) rather than
+either being silently omitted or faked as a pass for a mechanism that was never built. A failed
+result always carries a `severity` and `remediation`; a passed one always carries neither —
+asserted directly in the test suite.
+
+### Evidence redaction
+
+Every result's `evidence` string that mentions a session token uses `redactToken()` — the first 6
+characters followed by `…[REDACTED]` — never the full value.
+`apps/mock-lab/test/securityTests/runner.test.ts`'s "reports redacted evidence" test asserts this
+pattern holds for every result in a real run, not just a hand-picked example.
+
+### A real concurrency bug this caught
+
+Building the isolated fixtures originally fired two video uploads back-to-back without awaiting
+either one's processing, so their background `processVideo()` calls ran **concurrently**. Both
+transcodes actually succeeded (both `hls/` directories existed on disk), but one video's store
+record got stuck at `status: "processing"` forever — a classic *lost update*: `VideoStore`'s
+(and the shared `JsonStore`'s) `update()` did read-modify-write with no serialization, so the
+second concurrent call's final `status: "ready"` write landed on a **stale** read from before the
+first call's own write, silently clobbering it. Reproduced in isolation (two uploads, no
+`await` between them, against the same store instance), diagnosed by inspecting the raw
+`videos.json` after the race, and fixed by adding an in-process write queue (`enqueue()`, a simple
+promise chain) to both `VideoStore` and `JsonStore` so every mutating operation on the same store
+instance is now a serialized transaction relative to every other one. `fixtures.ts` also now
+uploads its two videos sequentially regardless, since there was never a reason for them to race.
+This is the same category of lesson as Prompt 2's Happy-Eyeballs bug and Prompt 3's `416`
+content-type bug: a scenario no single-request unit test exercises (two concurrent background
+operations against the same file-backed store) only surfaced once something actually drove real
+concurrent load through the real pipeline.
 
 ## HAR import redaction (`apps/api/src/har/`)
 
@@ -295,16 +460,18 @@ protected video's segment id alone does not grant access" test asserts this dire
 segment-inventory listing itself is gated the same way so the segment ids can't even be enumerated
 without authorization in the first place.
 
-### Ownership (`sub` claim, `DELETE /mock/videos/:id`)
+### Ownership (`DELETE /mock/videos/:id`)
 
-`SyntheticAuth` (Prompt 1) is extended, not replaced, with an optional `sub` claim — a synthetic
-identity used only for resource ownership, carried through as a third, optional constructor
-parameter (`issueToken(role, expiresInSeconds, sub)`) so every pre-existing call site keeps working
-unchanged; omitting it mints a fresh random identity. `POST /mock/videos` records the uploader's
-`sub` as `ownerId`; `DELETE /mock/videos/:id` requires the requester's `sub` to match `ownerId`, or
-the requester's role to be `admin`. The two Prompt 1 static demo fixtures are not deletable through
-this endpoint at all (`403`, checked before any auth lookup) — they're build-time fixtures, not
-user data.
+Updated this stage: `ownerId` on a `VideoRecord` is now the uploader's real account `userId` (from
+`account/sessionStore.ts`), not the Prompt 3 synthetic `sub` claim, since `POST /mock/videos` now
+requires a Prompt 4 account session rather than the legacy role token. `DELETE /mock/videos/:id`
+allows the requester if their `userId` matches the video's `ownerId` **or** they own the video's
+channel (currently always the same account, since channels are auto-created per uploader, but
+checked both ways for robustness). There is intentionally no separate "admin can delete anyone's
+video" override anymore — Prompt 3's global `admin` role doesn't carry forward into the per-channel
+ownership model, and nothing in the project vision requires it. The two Prompt 1 static demo
+fixtures are still not deletable through this endpoint at all (`403`, checked before any auth
+lookup) — they're build-time fixtures, not user data.
 
 ### HTTP delivery (`video/rangeDelivery.ts`)
 
@@ -341,11 +508,23 @@ an ownership or authorization input) and the file itself goes through format det
 
 ## Threats explicitly out of scope for this stage
 
-- Authentication/authorization of the dashboard itself (there is no user login yet — anyone who
-  can reach the dashboard can use it, which is acceptable for a local research tool but would need
-  revisiting before any shared/public deployment).
-- Persistent storage security (the findings/analysis-history/video-registry JSON files have no
-  access control beyond the filesystem's — revisited when PostgreSQL is introduced in Prompt 4).
+- Authentication/authorization of the dashboard *application* itself (anyone who can reach
+  `localhost:3000` can use it — the account system this stage adds controls access to mock-lab
+  *resources*, not to the dashboard page itself, which is acceptable for a local research tool but
+  would need revisiting before any shared/public deployment).
+- Persistent storage security (every JSON store — findings, analysis history, videos, users,
+  channels, memberships, sessions, audit events — has no access control beyond the filesystem's;
+  revisited when PostgreSQL is introduced, if Prompt 5's reporting needs it).
+- No per-video entitlement: a membership grants access to every `members`-visibility video on a
+  channel, not individually priced videos — a `MembershipPlan` is channel-scoped by design in this
+  stage's data model.
+- No session-fixation-specific hardening beyond rotation-on-login/rotation-on-privilege-change
+  (e.g. no explicit regeneration purely on privilege *downgrade*, since this system has none —
+  membership only ever activates or gets explicitly revoked via its own dedicated, already-audited
+  endpoint).
+- No IP-based or device-based session binding — a stolen token is usable from anywhere until it
+  expires or is revoked, same as most bearer-token systems; out of scope for a local research tool
+  with no real adversary model beyond "another local process."
 - HAR/manifest-content request bodies are capped by byte size (`HAR_MAX_UPLOAD_BYTES`,
   `MANIFEST_MAX_CONTENT_BYTES`) and the HAR entry count is separately capped
   (`HAR_MAX_ENTRIES`), but there's no protection against pathologically *nested* JSON/XML beyond

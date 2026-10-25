@@ -2,7 +2,7 @@
 
 import { useRef, useState } from "react";
 import { MOCK_LAB_BASE_URL } from "@/lib/config";
-import { useMockLabSession } from "@/lib/mockLabSession";
+import { useAccountSession } from "@/lib/accountSession";
 import { StatusBadge } from "./StatusBadge";
 
 type UploadState =
@@ -13,7 +13,7 @@ type UploadState =
   | { kind: "failed"; message: string };
 
 export function VideoUpload({ onReady }: { onReady?: () => void }) {
-  const { session } = useMockLabSession();
+  const { session } = useAccountSession();
   const fileInputRef = useRef<HTMLInputElement>(null);
   const [visibility, setVisibility] = useState<"public" | "members">("public");
   const [state, setState] = useState<UploadState>({ kind: "idle" });
